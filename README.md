@@ -37,8 +37,13 @@ B3组 校园作业分析器
 导师：陈银香  
 组员：欧阳进达、吴汶轩、胡以琳、程诺、黎敦文  
 项目后期维护组（贡献者）：WWX、ZYH、CN  
-[![turtle-Owen](https://github.com/turtle-Owen.png?size=15)](https://github.com/turtle-Owen)  
-[![Tom505915-Zhang](https://github.com/Tom505915-Zhang.png?size=15)](https://github.com/Tom505915-Zhang)
+
+<a href="https://github.com/turtle-Owen">
+  <img src="https://github.com/turtle-Owen.png?size=50" width="50" height="50" alt="turtle-Owen">
+</a>
+<a href="https://github.com/Tom505915-Zhang">
+  <img src="https://github.com/Tom505915-Zhang.png?size=50" width="50" height="50" alt="Tom505915-Zhang">
+</a>
 
 
 ![Logo](微信图片_2026-10-11_112449_801.jpg)
