@@ -1,11 +1,13 @@
 /**
- * Rebuild the roadshow deck from ../index.html.
+ * Rebuild the roadshow deck from ../index.html (or ../index.EN.html).
  *
- *   node build.mjs            # renders PNGs, then writes the .pptx and .pdf
- *   node build.mjs --png      # only re-render the slide images
+ *   node build.mjs              # renders PNGs, then writes the .pptx and .pdf
+ *   node build.mjs --png        # only re-render the slide images
+ *   node build.mjs --lang=en    # build the English deck from ../index.EN.html
+ *   node build.mjs --lang=en --png
  *
  * Requires a Chromium browser (Chrome or Edge) and `npm install` in this folder.
- * Nothing here touches the application source — it only reads ../index.html.
+ * Nothing here touches the application source — it only reads the deck HTML.
  */
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -15,9 +17,14 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DECK = path.resolve(HERE, '..');
-const OUTDIR = path.join(HERE, '.build');
-const HTML = path.join(DECK, 'index.html');
+const LANG = (process.argv.find((a) => a.startsWith('--lang=')) || '').split('=')[1] || 'zh';
+const EN = LANG === 'en';
+const OUTDIR = path.join(HERE, EN ? '.build-en' : '.build');
+const HTML = path.join(DECK, EN ? 'index.EN.html' : 'index.html');
 const SLIDES = path.join(OUTDIR, 'slides');
+/* Output base name: Chinese deck keeps its original name, the English deck is
+   suffixed with `.EN` so the two stay paired and obviously related. */
+const BASENAME = EN ? '校园作业分析器-路演.EN' : '校园作业分析器-路演';
 
 const CHROME = [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -181,16 +188,18 @@ async function buildPptx() {
   const pptx = new PptxGenJS();
   pptx.defineLayout({ name: 'DECK169', width: W, height: H });
   pptx.layout = 'DECK169';
-  pptx.author = '梅沙黑客松B3组';
-  pptx.company = '2026 梅沙青少年黑客松邀请赛';
-  pptx.title = '校园作业分析器 · Smart Campus Homework Analyzer';
-  pptx.subject = '路演 PPT · v0.2.0-rc1';
+  pptx.author = EN ? 'MES Hackathon Team B3' : '梅沙黑客松B3组';
+  pptx.company = EN ? '2026 Meisha Youth Hackathon Invitational' : '2026 梅沙青少年黑客松邀请赛';
+  pptx.title = EN
+    ? 'Smart Campus Homework Analyzer · Roadshow'
+    : '校园作业分析器 · Smart Campus Homework Analyzer';
+  pptx.subject = EN ? 'Roadshow deck · v0.2.0-rc1 (EN)' : '路演 PPT · v0.2.0-rc1';
   slides.forEach((f, i) => {
     const s = pptx.addSlide();
     s.addImage({ path: path.join(SLIDES, f), x: 0, y: 0, w: W, h: H });
     s.addNotes(notes[i]);
   });
-  const out = path.join(DECK, '校园作业分析器-路演.pptx');
+  const out = path.join(DECK, `${BASENAME}.pptx`);
   await pptx.writeFile({ fileName: out });
   console.log(`  ${path.basename(out)}  ${(fs.statSync(out).size / 1048576).toFixed(1)} MB`);
 }
@@ -212,7 +221,7 @@ async function buildPdf() {
       marginLeft: 0,
       marginRight: 0,
     });
-    const out = path.join(DECK, '校园作业分析器-路演.pdf');
+    const out = path.join(DECK, `${BASENAME}.pdf`);
     fs.writeFileSync(out, Buffer.from(data, 'base64'));
     console.log(`  ${path.basename(out)}  ${(fs.statSync(out).size / 1048576).toFixed(2)} MB`);
   } finally {

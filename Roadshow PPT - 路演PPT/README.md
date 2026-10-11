@@ -2,6 +2,8 @@
 
 **2026 梅沙青少年黑客松邀请赛 · B3组 · v0.2.0-rc1**
 
+[English](README.EN.md) | 中文
+
 ---
 
 ## 打开哪一个文件
@@ -11,8 +13,13 @@
 | **`index.html`** | **现场放映（推荐）** | 双击用浏览器打开，按 `F` 全屏。动画、渐显、总览、演讲备注都在这里。设计源文件，改文字就改它。 |
 | **`校园作业分析器-路演.pptx`** | **提交 / 备用** | 15 页，标准 16:9。每页都是 3840×2160 的高清成品图，**并带完整演讲备注**（PowerPoint 里按「视图 → 备注页」或演讲者视图可见）。 |
 | **`校园作业分析器-路演.pdf`** | **提交 / 打印** | 15 页，每页 20×11.25 英寸（严格 16:9），矢量不变形。 |
+| **`index.EN.html`** | **英文现场放映** | 英文版设计源文件。版式、配色、动效与中文版完全一致，仅文字为英文。 |
+| **`校园作业分析器-路演.EN.pptx`** | **英文提交 / 备用** | 15 页英文版，规格与中文 PPTX 完全相同。 |
+| **`校园作业分析器-路演.EN.pdf`** | **英文提交 / 打印** | 15 页英文版 PDF。 |
 
-> PPTX 用的是「整页高清图 + 原生备注」的做法：保证在任何电脑、任何投影仪上打开都和设计稿一模一样（不会因缺字体而跑版）。**要改文字请改 `index.html`，然后重新生成**（见下）。
+> PPTX 用的是「整页高清图 + 原生备注」的做法：保证在任何电脑、任何投影仪上打开都和设计稿一模一样（不会因缺字体而跑版）。**要改文字请改 `index.html`（英文版改 `index.EN.html`），然后重新生成**（见下）。
+>
+> 注：PPTX/PDF 中的界面截图取自中文版应用真实运行界面，因此截图内的 UI 文字仍为中文；页面标题、正文与演讲备注均为对应语言。
 
 ---
 
@@ -55,11 +62,12 @@
 
 ## 需要改的地方
 
-**团队名称**默认写的是 **B3组**（取自仓库提交作者）。全文件替换即可：
+**团队名称**默认写的是 **B3组**（取自仓库提交作者）。全文件替换即可（英文版对应 `Team B3`）：
 
 ```powershell
-cd 路演PPT
+cd "Roadshow PPT - 路演PPT"
 (Get-Content index.html -Raw) -replace 'B3组', '你的团队名' | Set-Content index.html -Encoding utf8
+(Get-Content index.EN.html -Raw) -replace 'Team B3', 'Your Team Name' | Set-Content index.EN.html -Encoding utf8
 ```
 
 其余可替换项：封面上的 `v0.2.0-rc1`、收尾页的仓库地址与二维码。
@@ -69,13 +77,18 @@ cd 路演PPT
 ## 改完以后重新生成 PPTX / PDF
 
 ```powershell
-cd 路演PPT\tools
+cd "Roadshow PPT - 路演PPT\tools"
 npm install        # 只需第一次（已预装，可跳过）
-node build.mjs     # 渲染 15 张 4K 图 → 重新生成 .pptx 与 .pdf
-node build.mjs --png   # 只重新渲染图片
+
+node build.mjs            # 中文版：渲染 15 张 4K 图 → 重新生成 .pptx 与 .pdf
+node build.mjs --png      # 中文版：只重新渲染图片
+
+node build.mjs --lang=en  # 英文版：读取 ../index.EN.html，生成 .EN.pptx 与 .EN.pdf
 ```
 
-需要本机装有 Chrome 或 Edge（脚本会自动寻找）。生成产物会写回 `路演PPT/` 目录，覆盖同名文件。
+需要本机装有 Chrome 或 Edge（脚本会自动寻找）。生成产物会写回 `Roadshow PPT - 路演PPT/` 目录，覆盖同名文件。
+
+> 两套产物互不干扰：中文版读 `index.html`、写入 `.build/`；英文版读 `index.EN.html`、写入 `.build-en/`。
 
 ---
 

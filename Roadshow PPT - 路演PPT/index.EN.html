@@ -1,0 +1,991 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Smart Campus Homework Analyzer · Roadshow</title>
+<link rel="stylesheet" href="assets/fonts.css">
+<style>
+/* Inter ships with U+2000–206F in its latin slice, so Chinese curly quotes (" ")
+   and the ellipsis would render with Inter's narrow Latin glyphs and break the CJK
+   text rhythm. Re-declare the same file under a narrower range that excludes
+   U+2018-201D and U+2026, so those codepoints fall through to the CJK face.
+   (Same idea as Apple's `:lang(zh)` overrides — CJK must never inherit Latin metrics.) */
+@font-face{font-family:'Inter Deck';font-style:normal;font-weight:400 600;font-display:block;
+  src:url('assets/fonts/Inter-latin-1.woff2') format('woff2');
+  unicode-range:U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,
+    U+0329,U+2000-200A,U+2010-2015,U+201A-201B,U+201E-2025,U+2027,U+2030-205E,U+20AC,U+2122,
+    U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD}
+
+/* ============================================================
+   Smart Campus Homework Analyzer — Roadshow deck
+   Design language reproduced from Apple's shipped production CSS
+   (apple.com/os, apple.com/iphone-duo): type scale, token colors,
+   radii, motion params. Notes marked (exact) are read verbatim.
+   ============================================================ */
+
+:root{
+  /* ── Type ───────────────────────────────────────────────── */
+  --font:"Inter Deck","Inter","Noto Sans SC",-apple-system,BlinkMacSystemFont,"SF Pro SC","SF Pro Display",
+         "PingFang SC","Hiragino Sans GB","Microsoft YaHei","Segoe UI",Helvetica,Arial,sans-serif;
+  --font-num:"Inter Deck","Inter","SF Pro Display",-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;
+
+  /* Apple's scale, shifted one tier for a 1920×1080 canvas (every display size is +4px leading) */
+  --t-hero:112px;   --lh-hero:116px;
+  --t-h1:80px;      --lh-h1:84px;
+  --t-h2:64px;      --lh-h2:68px;
+  --t-h3:40px;      --lh-h3:44px;
+  --t-h4:28px;      --lh-h4:32px;
+  --t-body:21px;    --lh-body:32px;
+  --t-lead:24px;    --lh-lead:34px;
+  --t-cap:17px;     --lh-cap:25px;
+  --t-foot:14px;    --lh-foot:20px;
+  --w-reg:400; --w-med:500; --w-semi:600;   /* Apple ships only 400/500/600 — no 700, no italics */
+
+  /* ── Color — exact Apple tokens ─────────────────────────── */
+  --c-bg:#ffffff;
+  --c-bg-alt:rgb(245,245,247);
+  --c-dark:#000000;
+  --c-dark-alt:rgb(29,29,31);
+  --c-text:rgb(29,29,31);
+  --c-text-2:rgb(110,110,115);
+  --c-text-3:rgb(134,134,139);
+  --c-text-d:rgb(245,245,247);
+  --c-text-2d:rgb(134,134,139);
+  --c-blue:rgb(0,113,227);
+  --c-link:rgb(0,102,204);
+  --c-link-d:rgb(41,151,255);
+  --c-divider:rgb(210,210,215);
+  --c-divider-d:rgba(255,255,255,.15);
+  --c-mes:#19c642;                     /* sampled from the MES Hackathon template lockup */
+
+  /* ── Layout ─────────────────────────────────────────────── */
+  --w:1920px; --h:1080px;
+  --pad-x:176px; --pad-y:112px;
+
+  /* ── Motion — exact Apple StaggeredFadeIn params ────────── */
+  --ease-reveal:cubic-bezier(.455,.03,.515,.955);  /* approx of easeInOutQuad */
+  --ease-ui:cubic-bezier(0,0,.5,1);
+  --reveal-dur-o:.9s; --reveal-dur-y:.7s; --reveal-stagger:.15s; --reveal-y:30px;
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#08080a;overflow:hidden}
+body{
+  font-family:var(--font); color:var(--c-text);
+  -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+  /* Apple ships `:lang(zh){letter-spacing:0em}` for 34 classes — CJK must never be negatively tracked. */
+  letter-spacing:0;
+}
+h1,h2,h3,h4,p,figure,blockquote{margin:0}
+ul{margin:0;padding:0;list-style:none}
+.en{letter-spacing:-.011em}
+.num{font-family:var(--font-num);font-feature-settings:"tnum" 1,"lnum" 1;letter-spacing:-.022em}
+
+/* ============================================================
+   Stage & slide mechanics
+   ============================================================ */
+#stage{position:fixed;inset:0;display:grid;place-items:center}
+#deck{width:var(--w);height:var(--h);position:relative;transform-origin:center center;
+      overflow:hidden;background:var(--c-bg)}
+
+.slide{
+  position:absolute;inset:0;width:var(--w);height:var(--h);
+  display:flex;flex-direction:column;overflow:hidden;
+  opacity:0;visibility:hidden;pointer-events:none;
+  transition:opacity .5s var(--ease-ui),visibility 0s linear .5s;
+  background:var(--c-bg);color:var(--c-text);
+}
+.slide.active{opacity:1;visibility:visible;pointer-events:auto;transition-delay:0s,0s;z-index:2}
+.slide[data-theme="alt"]{background:var(--c-bg-alt)}
+.slide[data-theme="dark"]{background:var(--c-dark);color:var(--c-text-d)}
+.slide[data-theme="darkalt"]{background:var(--c-dark-alt);color:var(--c-text-d)}
+
+.pad{position:relative;z-index:2;flex:1;display:flex;flex-direction:column;
+     padding:var(--pad-y) var(--pad-x);min-height:0}
+.pad.flush{padding-bottom:0}
+
+/* Vertical rhythm: a fixed header, then the body takes the remaining space.
+   .fill    → body stretches edge-to-edge (used for bottom-bleeding screenshots)
+   .center  → body is centred in the leftover space (used for statements/lists) */
+.body-area{flex:1;min-height:0;display:flex;flex-direction:column}
+.body-area.center{justify-content:center}
+
+/* Ambient backdrop — spec restraint: ≤3 hues, ≤.25 opacity, content always on top. */
+.amb{position:absolute;inset:0;z-index:1;pointer-events:none}
+.amb-a{position:absolute;inset:0;
+  background:
+    radial-gradient(70% 62% at 76% 4%,  rgba(25,198,66,.30), transparent 66%),
+    radial-gradient(64% 58% at 14% 98%, rgba(0,113,227,.34), transparent 68%);
+  filter:blur(36px)}
+.amb-b{position:absolute;inset:0;
+  background:
+    radial-gradient(58% 54% at 18% 8%,  rgba(0,113,227,.26), transparent 66%),
+    radial-gradient(60% 56% at 86% 94%, rgba(25,198,66,.16), transparent 68%);
+  filter:blur(36px)}
+.amb-c{position:absolute;inset:0;
+  background:radial-gradient(72% 66% at 50% 108%, rgba(0,113,227,.26), transparent 70%);
+  filter:blur(36px)}
+/* The Liquid Glass specular edge — exact Apple conic gradient (light from the top-right). */
+.glassert{position:absolute;inset:0;z-index:3;pointer-events:none;
+  background:conic-gradient(from 90deg,
+    rgba(255,255,255,.08) 0deg, rgba(255,255,255,.30) 64.8deg,
+    rgba(255,255,255,.30) 115.2deg, rgba(255,255,255,.08) 180deg,
+    rgba(255,255,255,0) 208.8deg, rgba(255,255,255,0) 331.2deg,
+    rgba(255,255,255,.08) 360deg);
+  -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude;padding:1px}
+
+/* ============================================================
+   Type roles
+   ============================================================ */
+.eyebrow{font-size:var(--t-h4);line-height:1;font-weight:var(--w-semi);color:var(--c-text-3);
+  letter-spacing:.011em;text-transform:uppercase}
+.slide[data-theme="dark"] .eyebrow,.slide[data-theme="darkalt"] .eyebrow{color:var(--c-text-2d)}
+.h2{font-size:var(--t-h2);line-height:var(--lh-h2);font-weight:var(--w-semi);letter-spacing:-.003em}
+.h3{font-size:var(--t-h3);line-height:var(--lh-h3);font-weight:var(--w-semi);letter-spacing:.007em;color:var(--c-text-2)}
+.slide[data-theme="dark"] .h3,.slide[data-theme="darkalt"] .h3{color:var(--c-text-2d)}
+.h4{font-size:var(--t-h4);line-height:var(--lh-h4);font-weight:var(--w-semi);letter-spacing:.007em}
+.hero{font-size:var(--t-hero);line-height:var(--lh-hero);font-weight:var(--w-semi);letter-spacing:-.015em}
+.lead{font-size:var(--t-lead);line-height:1.45;font-weight:var(--w-reg);color:var(--c-text-2)}
+.slide[data-theme="dark"] .lead,.slide[data-theme="darkalt"] .lead{color:var(--c-text-2d)}
+.body{font-size:var(--t-body);line-height:1.5;font-weight:var(--w-reg);color:var(--c-text-2)}
+.slide[data-theme="dark"] .body,.slide[data-theme="darkalt"] .body{color:var(--c-text-2d)}
+.cap{font-size:var(--t-cap);line-height:1.45;color:var(--c-text-3)}
+.slide[data-theme="dark"] .cap,.slide[data-theme="darkalt"] .cap{color:var(--c-text-3d)}
+.foot{font-size:var(--t-foot);line-height:var(--lh-foot);color:var(--c-text-3)}
+.dim{color:var(--c-text-3)}
+.slide[data-theme="dark"] .dim,.slide[data-theme="darkalt"] .dim{color:var(--c-text-3d)}
+strong{font-weight:var(--w-semi);color:inherit}
+.hl{color:var(--c-blue)}
+.slide[data-theme="dark"] .hl{color:var(--c-link-d)}
+.mes{color:var(--c-mes)}
+.nowrap{white-space:nowrap}
+
+.rule{height:1px;background:var(--c-divider);border:0;margin:0}
+.slide[data-theme="dark"] .rule,.slide[data-theme="darkalt"] .rule{background:var(--c-divider-d)}
+
+/* Header row: headline left, note right, baseline-aligned (Apple's section-header) */
+.hrow{display:flex;align-items:flex-end;justify-content:space-between;gap:80px}
+.hrow .side{max-width:30em;padding-bottom:6px;flex:0 0 auto}
+
+/* ============================================================
+   Components
+   ============================================================ */
+/* Apple card: flat fill, 28px radius, no border, no shadow. */
+.card{background:var(--c-bg-alt);border-radius:28px;padding:44px 42px;
+      clip-path:inset(1px round 28px);display:flex;flex-direction:column}
+.slide[data-theme="dark"] .card,.slide[data-theme="darkalt"] .card{background:var(--c-dark-alt)}
+.slide[data-theme="alt"] .card{background:#fff}
+
+.pill{display:inline-flex;align-items:center;border-radius:980px;
+      font-size:var(--t-foot);line-height:1;font-weight:var(--w-med);letter-spacing:-.011em;
+      padding:10px 18px;background:rgba(0,0,0,.05);color:var(--c-text-2)}
+.slide[data-theme="dark"] .pill,.slide[data-theme="darkalt"] .pill{background:rgba(255,255,255,.10);color:var(--c-text-2d)}
+.pill.solid{background:var(--c-blue);color:#fff}
+
+/* Screenshot frames. Apple uses clip-path:inset(1px round 28px) for card media and a
+   hairline (`inset 0 0 .5px 0 rgba(0,0,0,.11)`) — there are no drop shadows in this deck. */
+.shot{position:relative;border-radius:24px;overflow:hidden;background:#fff;
+      box-shadow:inset 0 0 0 1px rgba(0,0,0,.10)}
+.slide[data-theme="dark"] .shot,.slide[data-theme="darkalt"] .shot{box-shadow:inset 0 0 0 1px rgba(255,255,255,.16)}
+/* Bottom bleed: fills the remaining height and crops off the slide edge, like Apple's product heroes. */
+.bleed{flex:1;min-height:0;margin-top:46px;border-radius:24px 24px 0 0}
+.bleed img{width:100%;height:100%;object-fit:cover;object-position:top center;display:block}
+/* Exact-aspect frame: never crops the product UI. */
+.frame{width:100%;aspect-ratio:16/9}
+.frame img{width:100%;height:100%;object-fit:contain;display:block;background:#fff}
+
+.appicon{display:block;border-radius:22.5%}
+
+/* Data display */
+.stat .v{font-family:var(--font-num);font-feature-settings:"tnum" 1;font-weight:var(--w-semi);
+  font-size:var(--t-h1);line-height:1;letter-spacing:-.022em}
+.stat .k{font-size:var(--t-cap);line-height:1.45;color:var(--c-text-3);margin-top:16px}
+.slide[data-theme="dark"] .stat .k,.slide[data-theme="darkalt"] .stat .k{color:var(--c-text-3d)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:0}
+.stats > div{padding-left:48px;border-left:1px solid var(--c-divider)}
+.stats > div:first-child{padding-left:0;border-left:0}
+.slide[data-theme="dark"] .stats > div,.slide[data-theme="darkalt"] .stats > div{border-color:var(--c-divider-d)}
+
+.steps{display:grid;grid-template-columns:repeat(5,1fr);gap:44px}
+.step{display:flex;flex-direction:column}
+.step .bar{height:2px;background:var(--c-blue);border-radius:2px;margin-bottom:28px}
+.step .n{font-family:var(--font-num);font-size:var(--t-h4);line-height:1;font-weight:var(--w-med);
+  color:var(--c-text-3);letter-spacing:.02em}
+.slide[data-theme="dark"] .step .n{color:var(--c-text-3d)}
+.step .t{font-size:var(--t-lead);line-height:1.25;font-weight:var(--w-semi);margin:24px 0 16px}
+.step .d{font-size:var(--t-cap);line-height:1.5;color:var(--c-text-2)}
+.slide[data-theme="dark"] .step .d{color:var(--c-text-2d)}
+
+.cols{display:grid;gap:32px}
+.cols.c3{grid-template-columns:repeat(3,1fr)}
+
+/* Two-column split with a hairline divider (Apple uses #d2d2d7 hairlines, never boxes). */
+.split{display:flex;align-items:stretch;gap:0}
+.split > .sc{flex:1;min-width:0}
+.split > .vr{flex:0 0 1px;background:var(--c-divider);margin:0 72px}
+.slide[data-theme="dark"] .split > .vr,.slide[data-theme="darkalt"] .split > .vr{background:var(--c-divider-d)}
+
+.featlist{display:flex;flex-wrap:wrap;gap:12px}
+/* Apple's tech-spec pattern: a quiet grey label above the value. */
+.techgrid{display:grid;grid-template-columns:1fr 1fr;gap:52px 48px}
+.techgrid .tl{font-size:var(--t-cap);line-height:1.4;font-weight:var(--w-reg);
+  color:var(--c-text-3d);margin-bottom:10px}
+.techgrid .body{color:var(--c-text-d)}
+.pllist{display:grid;gap:14px}
+.pllist li{display:flex;gap:14px;align-items:baseline}
+.pllist .d{color:var(--c-blue);font-size:var(--t-cap);line-height:1.4;flex:0 0 auto}
+.slide[data-theme="dark"] .pllist .d{color:var(--c-link-d)}
+
+.quote{font-size:var(--t-lead);line-height:1.7;color:var(--c-text-d)}
+.quote .mk{color:var(--c-mes)}
+a{color:var(--c-link);text-decoration:none}
+.slide[data-theme="dark"] a,.slide[data-theme="darkalt"] a{color:var(--c-link-d)}
+
+/* ============================================================
+   Reveal — Apple StaggeredFadeIn (exact params)
+   ============================================================ */
+.r{opacity:0;transform:translateY(var(--reveal-y))}
+.slide.active .r.is-in{
+  opacity:1;transform:translateY(0);
+  transition:opacity var(--reveal-dur-o) var(--ease-reveal),
+             transform var(--reveal-dur-y) var(--ease-reveal);
+  transition-delay:calc(var(--i,0) * var(--reveal-stagger));
+}
+
+/* ============================================================
+   HUD / notes / overview
+   ============================================================ */
+#hud{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:40;
+  display:flex;align-items:center;gap:14px;padding:8px 16px;border-radius:980px;
+  background:rgba(20,20,22,.68);backdrop-filter:saturate(180%) blur(20px);
+  color:rgba(255,255,255,.72);font-size:12px;letter-spacing:-.01em;
+  opacity:0;transition:opacity .35s var(--ease-ui);pointer-events:none;white-space:nowrap}
+#hud.show{opacity:1}
+#hud b{color:#fff;font-weight:500}
+#hud .kbd{font-family:var(--font-num);background:rgba(255,255,255,.14);
+  padding:2px 6px;border-radius:5px;color:#fff}
+#bar{position:fixed;left:0;top:0;height:2px;background:var(--c-blue);z-index:41;
+  width:0;transition:width .4s var(--ease-ui);opacity:.9}
+
+#notes{position:fixed;inset:auto 0 0 0;z-index:45;max-height:46vh;overflow:auto;
+  background:rgba(18,18,20,.94);backdrop-filter:saturate(180%) blur(20px);
+  color:rgba(255,255,255,.86);padding:30px 44px 36px;transform:translateY(101%);
+  transition:transform .4s var(--ease-ui);font-size:15px;line-height:1.8}
+#notes.show{transform:translateY(0)}
+#notes h5{margin:0 0 12px;font-size:12px;font-weight:500;letter-spacing:.06em;
+  text-transform:uppercase;color:rgba(255,255,255,.45)}
+#notes p{margin:0;max-width:112ch}
+
+#grid{position:fixed;inset:0;z-index:50;background:rgba(8,8,10,.96);
+  backdrop-filter:blur(20px);display:none;grid-template-columns:repeat(4,1fr);
+  gap:24px;padding:52px;overflow:auto;align-content:start}
+#grid.show{display:grid}
+#grid button{border:0;padding:0;background:none;cursor:pointer;text-align:left;
+  border-radius:12px;display:block;width:100%;
+  transition:outline-color .1s linear,transform .3s var(--ease-ui)}
+#grid button:hover{transform:scale(1.0161)}
+#grid .gt{color:rgba(255,255,255,.6);font-size:12px;padding:9px 2px 0;display:block}
+#grid .gwrap{display:block;background:#fff;aspect-ratio:16/9;overflow:hidden;position:relative;
+  outline:1px solid rgba(255,255,255,.14);border-radius:12px}
+/* Live 1:1 clone of the slide, scaled to the tile by JS (see scaleGrid). */
+#grid .gwrap .mini{position:absolute;inset:auto;top:0;left:0;width:1920px;height:1080px;
+  transform-origin:top left;opacity:1;visibility:visible;transition:none}
+#grid .gwrap .mini .r{opacity:1;transform:none;transition:none}
+
+/* ============================================================
+   Render mode (?render=N) and print
+   ============================================================ */
+body.render #hud,body.render #notes,body.render #grid,body.render #bar{display:none!important}
+body.render .slide{transition:none!important}
+
+@page{size:1920px 1080px;margin:0}
+@media print{
+  html,body{overflow:visible;background:#fff;height:auto}
+  #stage{position:static;display:block}
+  #deck{width:1920px;height:auto;transform:none!important;overflow:visible}
+  .slide{position:relative;inset:auto;opacity:1!important;visibility:visible!important;
+    transform:none!important;transition:none!important;page-break-after:always;break-after:page}
+  .slide:last-child{page-break-after:auto;break-after:auto}
+  .r{opacity:1!important;transform:none!important}
+  #hud,#notes,#grid,#bar{display:none!important}
+  .slide,.amb,.glassert{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+@media (prefers-reduced-motion:reduce){
+  .r{opacity:1!important;transform:none!important}
+  .slide{transition:none}
+}
+</style>
+</head>
+<body>
+<noscript><style>.r{opacity:1;transform:none}.slide{opacity:1;visibility:visible;position:relative}</style></noscript>
+
+<div id="bar"></div>
+<div id="stage"><div id="deck">
+
+<!-- ═══════════════════════ 01 · Cover ═══════════════════════ -->
+<section class="slide active" data-theme="dark"
+  data-notes="Opening ~20 seconds. One sentence to say who we are: Smart Campus Homework Analyzer — turning the daily grading teachers do into a ready-to-teach review lesson plan. Today isn't about 'yet another grading tool' — it's about the information wasted after grading is done.">
+  <div class="amb amb-a"></div><div class="amb amb-c"></div><div class="glassert"></div>
+  <div class="pad" style="align-items:center;justify-content:center;text-align:center">
+    <svg class="appicon r" style="--i:0;width:108px;height:108px" viewBox="0 0 120 120" aria-hidden="true">
+      <defs><linearGradient id="icg" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#4AA3FF"/><stop offset="1" stop-color="#0A5CD8"/></linearGradient></defs>
+      <rect width="120" height="120" rx="27" fill="url(#icg)"/>
+      <rect x="33" y="26" width="54" height="68" rx="11" fill="#fff"/>
+      <path d="M45 62 l9 9 l21 -22" fill="none" stroke="#0A5CD8" stroke-width="7"
+            stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+
+    <p class="eyebrow r" style="--i:1;margin-top:60px">2026 Meisha Youth Hackathon Invitational <span class="en">· MES HACKATHON</span></p>
+    <h1 class="hero r" style="--i:2;margin-top:32px">Smart Campus Homework Analyzer</h1>
+    <p class="h3 r" style="--i:3;margin-top:28px;letter-spacing:-.003em">
+      <span class="en">Turn every grading session into the next lesson</span></p>
+
+    <hr class="rule r" style="--i:4;width:88px;margin:56px 0 0;opacity:.45">
+    <p class="cap r" style="--i:5;margin-top:28px;color:var(--c-text-2d)">
+      <span class="en">v0.2.0-rc1</span> &nbsp;·&nbsp; Team B3 &nbsp;·&nbsp; <span class="en">MIT License</span> &nbsp;·&nbsp; Data stays on school premises
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 02 · Problem ═══════════════════════ -->
+<section class="slide" data-theme="light"
+  data-notes="The only slide about pain — no drama, just facts. Three things: grading itself is time-consuming, statistics are manual, review relies on gut feeling. The last line is the hook — the part that exhausts teachers the most is precisely the part most easily wasted.">
+  <div class="pad">
+    <div class="hrow">
+      <div>
+        <p class="eyebrow r" style="--i:0"><span class="en">The problem</span></p>
+        <h2 class="h2 r" style="--i:1;margin-top:22px">The night grading finishes,<br>the real work has just begun.</h2>
+      </div>
+      <p class="lead r side" style="--i:2">A teacher faces far more<br>than just 'finishing the grading.'</p>
+    </div>
+
+    <div class="body-area center">
+      <div class="cols c3 r" style="--i:3;margin-top:56px">
+        <div class="card">
+          <h3 class="h4" style="margin-bottom:18px">Grading is time-consuming</h3>
+          <p class="body">Annotating each question, writing comments, recording scores. Whole blocks of time get fragmented — one class takes an entire evening.</p>
+        </div>
+        <div class="card">
+          <h3 class="h4" style="margin-bottom:18px">Statistics are manual</h3>
+          <p class="body">Class error rates, knowledge mastery, error cause distribution — to see clearly, you have to count question by question.</p>
+        </div>
+        <div class="card">
+          <h3 class="h4" style="margin-bottom:18px">Review relies on gut feeling</h3>
+          <p class="body">The next day in class, you can usually only address 'the ones that felt like most students got wrong.'</p>
+        </div>
+      </div>
+      <p class="cap r" style="--i:4;margin-top:44px;text-align:center">
+        Result: <strong style="color:var(--c-text)">the part that exhausts teachers the most is precisely the part most easily wasted.</strong></p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 03 · Insight ═══════════════════════ -->
+<section class="slide" data-theme="dark"
+  data-notes="The core insight, and the starting point of the entire product. Grading already produces the class's most authentic learning evidence — the problem is no one has time to translate it into 'what to teach next class.' So what we built isn't faster grading — it's that translation layer.">
+  <div class="amb amb-b"></div>
+  <div class="pad body-area center" style="display:flex">
+    <p class="eyebrow r" style="--i:0"><span class="en">The insight</span></p>
+    <h2 class="hero r" style="--i:1;margin-top:44px;max-width:17em">
+      Grading produces data,<br>but data never becomes a lesson.
+    </h2>
+    <hr class="rule r" style="--i:2;margin:64px 0 0;width:112px;opacity:.4">
+    <p class="lead r" style="--i:3;margin-top:48px;max-width:30em">
+      The mistake notebook holds the class's most authentic learning evidence, yet no one has time to translate it into
+      'what to teach next class, who needs remediation.'
+    </p>
+    <p class="body r" style="--i:4;margin-top:28px;max-width:30em">
+      So what's truly missing isn't a faster grading tool —<br>it's a translator that turns <span class="dim">grading results</span> into
+      <strong style="color:var(--c-text-d)">teachable content</strong>.
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 04 · Product ═══════════════════════ -->
+<section class="slide" data-theme="light"
+  data-notes="Product in one sentence: turn a stack of homework into a lesson. This is the overview screenshot; the flow cards on the right are actually the product's five modules. Worth emphasizing here: this is a fully runnable full-stack product, not a concept mockup — it runs right now.">
+  <div class="pad flush">
+    <div class="hrow">
+      <div>
+        <p class="eyebrow r" style="--i:0"><span class="en">The product</span></p>
+        <h2 class="h2 r" style="--i:1;margin-top:22px">Turn a stack of homework into a lesson.</h2>
+        <p class="lead r" style="--i:2;margin-top:26px;max-width:34em">
+          Photo upload → <span class="en">AI</span> page-by-page recognition &amp; grading → Teacher review →
+          Auto-generated class insights, knowledge mastery rates, error cause attribution, and ready-to-use review lesson plans.
+        </p>
+      </div>
+      <div class="r side" style="--i:3;text-align:right">
+        <div style="display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap">
+          <span class="pill">Full-stack runnable</span><span class="pill">Local deployment</span>
+          <span class="pill">Data stays on campus</span><span class="pill solid">v0.2.0-rc1</span>
+        </div>
+        <p class="cap" style="margin-top:18px">Open it now, use it now.</p>
+      </div>
+    </div>
+    <div class="shot bleed r" style="--i:4">
+      <img src="assets/app-overview.jpg" alt="Smart Campus Homework Analyzer · Teacher Overview">
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 05 · Flow ═══════════════════════ -->
+<section class="slide" data-theme="alt"
+  data-notes="Five-step loop. Focus on steps 3 and 4: PDFs are converted to page images server-side — no manual conversion needed by teachers; low-confidence OCR results require teacher confirmation before entering student mistake notebooks — that's our baseline. Only after completing the full flow does step 5 have anything to analyze.">
+  <div class="pad">
+    <div class="hrow">
+      <div>
+        <p class="eyebrow r" style="--i:0"><span class="en">How it works</span></p>
+        <h2 class="h2 r" style="--i:1;margin-top:22px">Five-step loop, from a stack of paper to a lesson.</h2>
+      </div>
+      <p class="lead r side" style="--i:2">Every step has a human confirmation checkpoint.</p>
+    </div>
+
+    <div class="body-area center">
+      <div class="steps r" style="--i:3;margin-top:64px">
+        <div class="step">
+          <div class="bar"></div><div class="n">01</div>
+          <div class="t">Setup &amp; Import</div>
+          <div class="d">Independent school space; import up to <span class="en">500</span> students at once via <span class="en">CSV / XLSX</span>.</div>
+        </div>
+        <div class="step">
+          <div class="bar"></div><div class="n">02</div>
+          <div class="t">Create Assignment</div>
+          <div class="d">Upload <span class="en">JPG / PNG / WebP / PDF / DOCX</span> originals, parsed into editable questions.</div>
+        </div>
+        <div class="step">
+          <div class="bar"></div><div class="n">03</div>
+          <div class="t">Page-by-Page OCR</div>
+          <div class="d"><span class="en">PDFs</span> converted to page images server-side, page-by-page <span class="en">OCR</span>, strictly aligned with student answer sheets.</div>
+        </div>
+        <div class="step">
+          <div class="bar"></div><div class="n">04</div>
+          <div class="t">Teacher Review</div>
+          <div class="d">Low-confidence content requires teacher confirmation before entering student mistake notebooks.</div>
+        </div>
+        <div class="step">
+          <div class="bar"></div><div class="n">05</div>
+          <div class="t">Teaching Analysis</div>
+          <div class="d">One-click review plans, error cause statistics, tiered student lists, and practice assignments.</div>
+        </div>
+      </div>
+      <p class="cap r" style="--i:4;margin-top:56px;text-align:center">
+        Automation handles speed; <strong style="color:var(--c-text)">teachers handle judgment</strong>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 06 · AI teaching analysis ═══════════════════════ -->
+<section class="slide" data-theme="dark"
+  data-notes="This is the core of v0.2.0, and the slide we most want to present today. On the left is raw data: 1 student, 3 submissions, 18 questions, 24 mistakes, scoring rate 18%. On the right is the system's teaching conclusion — notice it says 'points were lost mainly because students didn't attempt rather than didn't know.' That judgment is nearly impossible to reach manually on the same day.">
+  <div class="amb amb-a"></div>
+  <div class="pad flush">
+    <div class="hrow">
+      <div>
+        <p class="eyebrow r" style="--i:0"><span class="en">AI teaching analysis</span> · New in v0.2.0</p>
+        <h2 class="h2 r" style="--i:1;margin-top:22px">The moment review is done,<br>the lesson plan is already there.</h2>
+      </div>
+      <p class="lead r side" style="--i:2">Not a longer report —<br>something you can bring into the classroom the next day.</p>
+    </div>
+
+    <div class="featlist r" style="--i:3;margin-top:40px">
+      <span class="pill">Class Profile</span><span class="pill">Knowledge Mastery</span>
+      <span class="pill">Error Attribution</span><span class="pill">High-Freq Mistake Sheet</span>
+      <span class="pill">Lesson Plan</span><span class="pill">Tiered Support</span>
+      <span class="pill">Follow-Up Practice</span><span class="pill">One-Click Export</span>
+    </div>
+
+    <div class="shot bleed r" style="--i:4">
+      <img src="assets/app-teaching.jpg" alt="AI Teaching Analysis · Class Insights and Teaching Conclusions">
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 07 · Principle ═══════════════════════ -->
+<section class="slide" data-theme="dark"
+  data-notes="This is the slide judges should remember most, and our biggest differentiator. All numbers are deterministically computed from teacher-reviewed data; the model only transcribes them into classroom language. So if the model is down or the API key isn't configured, core statistics remain fully functional. Two more details: error causes are strictly divided by question number, percentages always sum to 100%; questions marked 'Unrecognizable' are listed separately and excluded from student error causes — we never penalize students for poor scan quality.">
+  <div class="amb amb-b"></div>
+  <div class="pad">
+    <p class="eyebrow r" style="--i:0"><span class="en">Design principle</span></p>
+    <h2 class="h2 r" style="--i:1;margin-top:22px">Numbers are always trustworthy; <span class="en">AI</span> just puts them into plain language.</h2>
+
+    <div class="body-area center">
+      <div class="split r" style="--i:2;margin-top:56px">
+        <div class="sc">
+          <h3 class="h4" style="margin-bottom:10px">Deterministic Statistics <span class="dim" style="font-weight:400">· Verifiable</span></h3>
+          <p class="cap" style="margin-bottom:30px">All computed from teacher-reviewed data.</p>
+          <ul class="pllist">
+            <li><span class="d">·</span><span class="body">Only review-confirmed mistakes enter statistics; unreviewed ones counted separately</span></li>
+            <li><span class="d">·</span><span class="body">Error causes strictly divided by question number; percentages always sum to <span class="en">100%</span></span></li>
+            <li><span class="d">·</span><span class="body">Questions marked 'Unrecognizable' listed separately, excluded from student error causes</span></li>
+          </ul>
+          <p class="cap" style="margin-top:26px">The last rule prevents penalizing students for poor scan quality.</p>
+        </div>
+        <div class="vr"></div>
+        <div class="sc">
+          <h3 class="h4" style="margin-bottom:10px"><span class="en">AI</span> Transcription <span class="dim" style="font-weight:400">· Reviewable</span></h3>
+          <p class="cap" style="margin-bottom:30px">Only transcribes and suggests; never generates facts.</p>
+          <ul class="pllist">
+            <li><span class="d">·</span><span class="body">Core statistics remain fully functional when model is unavailable or <span class="en">API Key</span> not configured</span></li>
+            <li><span class="d">·</span><span class="body">Teachers can click '<span class="en">AI</span> Re-attribution' to re-evaluate with question context and knowledge points</span></li>
+            <li><span class="d">·</span><span class="body">Generated review scripts, board notes, and diagnostics shown as-is, editable line by line</span></li>
+          </ul>
+          <p class="cap" style="margin-top:26px">The cost of an error is 'a different phrasing,' not 'a wrong number.'</p>
+        </div>
+      </div>
+    </div>
+
+    <hr class="rule r" style="--i:3">
+    <p class="cap r" style="--i:4;margin-top:28px">
+      In short: <strong style="color:var(--c-text-d)">let the model do what it's good at — expression; let the code do what it's good at — arithmetic.</strong></p>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 08 · Mastery & causes ═══════════════════════ -->
+<section class="slide" data-theme="alt"
+  data-notes="Real data screenshot. On the left, knowledge mastery sorted from weakest first — teachers instantly know which gap to fill first in today's lesson. On the right, 12 error cause categories are determined by keyword-based deterministic classification, consuming no model quota; clicking 'AI Re-attribution' invokes the model to re-evaluate with question context.">
+  <div class="pad flush">
+    <div class="hrow">
+      <div>
+        <p class="eyebrow r" style="--i:0"><span class="en">Knowledge mastery &amp; error causes</span></p>
+        <h2 class="h2 r" style="--i:1;margin-top:22px">Which gap to fill first? The system tells you directly.</h2>
+      </div>
+      <p class="lead r side" style="--i:2">
+        18 knowledge points sorted by accuracy rate low to high; error causes strictly classified by question number, 12 built-in rule categories, percentages always sum to <span class="en nowrap">100%</span>.</p>
+    </div>
+    <div class="shot bleed r" style="--i:3">
+      <img src="assets/app-mastery.jpg" alt="Knowledge Mastery and Error Cause Attribution Analysis">
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 09 · Review script ═══════════════════════ -->
+<section class="slide" data-theme="light"
+  data-notes="This slide proves 'ready to teach.' Expand a high-frequency mistake to see affected students, reference answers, AI step-by-step solutions, and most importantly three sections below: explain to students, board demonstration, quick check after explanation. Teachers can read it aloud the next day. Content sorted by number of students who missed it, starting with the most critical.">
+  <div class="pad">
+    <div class="hrow">
+      <div>
+        <p class="eyebrow r" style="--i:0"><span class="en">Review script</span></p>
+        <h2 class="h2 r" style="--i:1;margin-top:22px">Not 'what was missed most' —<br>but 'how do I teach it.'</h2>
+      </div>
+      <p class="lead r side" style="--i:2">Sorted by number of students who missed it, starting with the most critical.</p>
+    </div>
+
+    <div class="body-area center" style="flex-direction:row;align-items:center;gap:64px">
+      <div class="r" style="--i:3;flex:0 0 496px">
+        <p class="body" style="margin-bottom:28px">
+          Expand to see affected students, reference answers, <span class="en">AI</span> step-by-step solutions,
+          and a review script you can read aloud.
+        </p>
+        <div class="card" style="background:var(--c-bg-alt);padding:38px 36px">
+          <p class="cap" style="margin-bottom:20px">Every high-frequency mistake includes</p>
+          <div style="display:grid;gap:16px">
+            <div class="body"><strong>Explain to Students</strong><br><span class="cap">One sentence that earns points</span></div>
+            <div class="body"><strong>Board Demonstration</strong><br><span class="cap">Content to write on the board</span></div>
+            <div class="body"><strong>Quick Check After Explanation</strong><br><span class="cap">Verify understanding in class</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="shot frame r" style="--i:4">
+        <img src="assets/app-review.jpg" alt="High-Frequency Mistake Review Sheet">
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 10 · Lesson plan ═══════════════════════ -->
+<section class="slide" data-theme="alt"
+  data-notes="This slide brings it into the classroom. 45 minutes broken into a timeline, each step specifying 'what to teach, what the teacher does, what students do,' plus board design; each error cause comes with a 5-minute actionable classroom activity and a named list for tiered support. Our internal saying: this isn't a report for administrators — it's a lesson plan for teachers themselves.">
+  <div class="pad">
+    <div class="body-area center" style="flex-direction:row;align-items:center;gap:64px">
+      <div class="shot frame r" style="--i:0">
+        <img src="assets/app-lessonplan.jpg" alt="Review Lesson Plan · 45-Minute Timeline">
+      </div>
+      <div class="r" style="--i:1;flex:0 0 496px">
+        <p class="eyebrow" style="margin-bottom:22px"><span class="en">Lesson plan &amp; differentiation</span></p>
+        <h2 class="h2" style="margin-bottom:28px">45 minutes — what to teach, who does what, all written out.</h2>
+        <p class="lead" style="margin-bottom:22px">
+          Theme, duration, objectives, timeline (what to teach / what the teacher does / what students do), and ready-to-copy board design.
+        </p>
+        <p class="body" style="margin-bottom:32px">
+          Each error cause comes with a <strong>5-minute actionable</strong> classroom activity
+          and a named list for tiered support.
+        </p>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <span class="pill" style="background:#fff">Board Design</span>
+          <span class="pill" style="background:#fff">Error Intervention</span>
+          <span class="pill" style="background:#fff">Tiered List</span>
+          <span class="pill" style="background:#fff">One-Click Repractice</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 11 · Student side ═══════════════════════ -->
+<section class="slide" data-theme="light"
+  data-notes="The student side does one thing: help students truly master their mistakes. Only teacher-confirmed mistakes enter the student notebook; the system automatically provides step-by-step solutions and similar variant exercises, marking knowledge points as passed once all answered correctly. No more hand-copying mistake notebooks; review becomes targeted.">
+  <div class="pad flush">
+    <div class="hrow">
+      <div>
+        <p class="eyebrow r" style="--i:0"><span class="en">The student side</span></p>
+        <h2 class="h2 r" style="--i:1;margin-top:22px">Every student gets<br>their own copy.</h2>      </div>
+      <p class="lead r side" style="--i:2">
+        Only teacher-confirmed mistakes enter the student notebook; knowledge points marked as passed once all answered correctly.</p>
+    </div>
+    <div class="shot bleed r" style="--i:3">
+      <img src="assets/app-student.jpg" alt="Student Side · My Mistakes and Practice Exercises">
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 12 · Real data ═══════════════════════ -->
+<section class="slide" data-theme="dark"
+  data-notes="Closing with real data. This is a real middle school physics stage assessment from the repo: 18 questions, 3 submissions, 24 reviewed mistakes, class scoring rate 18%. The most valuable finding is what the system discovered on its own — 21 of 24 mistakes were [Unanswered], 87.5%, meaning points were lost because students 'didn't attempt' rather than 'didn't know.' This conclusion directly changes how the lesson should be taught: not more problem-solving, but first addressing 'fear of attempting.'">
+  <div class="amb amb-a"></div>
+  <div class="pad">
+    <p class="eyebrow r" style="--i:0"><span class="en">Real data</span> · Middle School Physics · Chapter 15 Stage Assessment</p>
+    <h2 class="h2 r" style="--i:1;margin-top:22px">From a real exam paper, the system read<br>what the teacher didn't have time to read.</h2>
+
+    <div class="body-area center">
+      <div class="stats r" style="--i:2;margin-top:64px">
+        <div class="stat">
+          <div class="v"><span class="en">87.5%</span></div>
+          <div class="k">of mistakes were 'unanswered'<br><span class="en">21 / 24</span> instances</div>
+        </div>
+        <div class="stat">
+          <div class="v"><span class="en">18%</span></div>
+          <div class="k">Class scoring rate<br>Average <span class="en">18 / 100</span> pts</div>
+        </div>
+        <div class="stat">
+          <div class="v"><span class="en">5</span></div>
+          <div class="k">questions with <span class="en">100%</span> class error rate<br><span class="en">Q1, 6, 15, 16, 17</span></div>
+        </div>
+        <div class="stat">
+          <div class="v"><span class="en">36</span></div>
+          <div class="k">reusable similar exercises<br>covering <span class="en">18</span> knowledge points</div>
+        </div>
+      </div>
+
+      <div class="card r" style="--i:3;margin-top:60px;background:var(--c-dark-alt);padding:46px 50px">
+        <p class="cap" style="margin-bottom:20px"><span class="en">AI</span> Teaching Conclusion · Original Excerpt</p>
+        <p class="quote">
+          <span class="mk">"</span>This Chapter 15 stage assessment had only <span class="en">1</span> student (<span class="en">c</span>) who submitted
+          <span class="en">2</span> times, totaling <span class="en">3</span> records, <span class="en">18</span> questions with
+          <span class="en">24</span> mistakes across <span class="en">36</span> answer positions at <span class="en">66.7%</span> error rate,
+          scoring only <span class="en">18.0%</span>. Most critically, <span class="en">21</span> of the <span class="en">24</span> mistakes were
+          <span class="mk">[Unanswered]</span> (<span class="en">87.5%</span>)...
+          Points were lost mainly because students <span class="mk">"didn't attempt"</span> rather than "didn't know."<span class="mk">"</span>
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 13 · Engineering ═══════════════════════ -->
+<section class="slide" data-theme="alt"
+  data-notes="Judges often ask 'is it done?' This slide answers: production-ready means actually usable. Standard full-stack tech; quality backed by 24 unit tests plus 33 end-to-end verifications, some specifically testing permission boundaries — students can't read class analytics, school admins can read but can't trigger generation; security-wise, API keys encrypted server-side with AES-256-GCM, all queries isolated by school and identity.">
+  <div class="pad">
+    <div class="hrow">
+      <div>
+        <p class="eyebrow r" style="--i:0"><span class="en">Engineering</span></p>
+        <h2 class="h2 r" style="--i:1;margin-top:22px">Production-ready means actually usable.</h2>
+      </div>
+      <p class="lead r side" style="--i:2">Open-source <span class="en">MIT</span>, locally deployable, data stays on campus.</p>
+    </div>
+
+    <div class="body-area center">
+      <div class="cols c3 r" style="--i:3;margin-top:56px">
+        <div>
+          <h3 class="h4" style="margin-bottom:26px">Tech Stack</h3>
+          <div class="pllist">
+            <div class="body"><span class="dim">Frontend</span> &nbsp;<span class="en">React 19</span> + <span class="en">TypeScript</span> strict mode</div>
+            <div class="body"><span class="dim">Backend</span> &nbsp;<span class="en">Express</span> + <span class="en">SQLite</span> (single-writer)</div>
+            <div class="body"><span class="dim">Documents</span> &nbsp;<span class="en">PDF / DOCX / DOC</span> page-by-page parsing, server-side image conversion</div>
+            <div class="body"><span class="dim">Models</span> &nbsp;<span class="en">10</span> provider presets, <span class="en">OpenAI</span>-compatible vision format</div>
+            <div class="body"><span class="dim">Deployment</span> &nbsp;<span class="en">Cloudflare Worker</span> static hosting + <span class="en">API</span> proxy</div>
+          </div>
+        </div>
+        <div>
+          <h3 class="h4" style="margin-bottom:26px">Verification</h3>
+          <div class="pllist">
+            <div class="body"><strong class="en">24</strong> <span class="en">Vitest</span> unit tests</div>
+            <div class="cap">Error classification · Statistical standards · Data isolation · <span class="en">AI</span> attribution fusion</div>
+            <div class="body" style="margin-top:8px"><strong class="en">33</strong> end-to-end verifications</div>
+            <div class="cap">Read/write APIs · Statistical standards · Permission boundaries; uses fixture data, no paid model calls</div>
+            <div class="body" style="margin-top:8px"><span class="en">npm run build</span></div>
+            <div class="cap">Strict <span class="en">TS</span> checks + production build</div>
+          </div>
+        </div>
+        <div>
+          <h3 class="h4" style="margin-bottom:26px">Security &amp; Data</h3>
+          <div class="pllist">
+            <div class="body"><span class="en">API Key</span> encrypted server-side with <span class="en">AES-256-GCM</span></div>
+            <div class="body">All queries isolated by <strong>school and identity</strong></div>
+            <div class="body">Upload type and size validation; originals and student data excluded from version control</div>
+            <div class="body">Teacher review is a prerequisite for writing to mistake notebooks</div>
+            <div class="cap" style="margin-top:8px">Pre-launch TODO: email verification, login rate limiting, virus scanning, minor data processing terms.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <hr class="rule r" style="--i:4">
+    <p class="cap r" style="--i:5;margin-top:26px">
+      <span class="en">github.com/turtlelnc/MES-Homework</span> &nbsp;·&nbsp; <span class="en">v0.2.0-rc1</span>
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 14 · Open source & stack ═══════════════════════ -->
+<section class="slide" data-theme="darkalt"
+  data-notes="The open source and tech slide answers two questions: why trust us, and what did we use. Open source isn't a gesture — it's what educational software should be: schools can self-deploy, data stays on their servers, school-specific knowledge points and error rules are all customizable. Tech choices are deliberately minimal and stable: frontend React 19 + TypeScript strict mode, backend Express + SQLite, document parsing with PDF.js, mammoth, word-extractor, model layer with 10 provider presets plus AES-256-GCM encrypted keys. No unnecessary dependencies for show.">
+  <div class="amb amb-b"></div>
+  <div class="pad">
+    <div class="hrow">
+      <div>
+        <p class="eyebrow r" style="--i:0"><span class="en">Open source &amp; stack</span></p>
+        <h2 class="h2 r" style="--i:1;margin-top:22px">Fully open source — tech choices laid bare for you to see.</h2>
+      </div>
+      <p class="lead r side" style="--i:2"><span class="en">MIT License</span>, code on <span class="en">GitHub</span>,<br>one command to run it yourself.</p>
+    </div>
+
+    <div class="body-area center">
+      <div class="split r" style="--i:3;margin-top:56px">
+        <!-- Open Source -->
+        <div class="sc" style="flex:0 0 476px">
+          <h3 class="h4" style="margin-bottom:10px">Open Source <span class="dim" style="font-weight:400">· <span class="en">MIT</span></span></h3>
+          <p class="cap" style="margin-bottom:30px">Source code, data formats, and statistical methods all public.</p>
+
+          <div style="display:flex;align-items:center;gap:24px;margin-bottom:32px">
+            <img src="assets/qr-repo.png" alt="GitHub Repository QR Code"
+                 style="width:92px;height:92px;border-radius:12px;background:#fff;padding:7px;display:block;flex:0 0 auto">
+            <div>
+              <p class="body" style="color:var(--c-text-d);margin-bottom:6px"><span class="en">github.com/turtlelnc/</span></p>
+              <p class="body" style="color:var(--c-text-d)"><span class="en">MES-Homework</span></p>
+            </div>
+          </div>
+
+          <ul class="pllist">
+            <li><span class="d">·</span><span class="body"><strong style="color:var(--c-text-d)">Self-deployable</strong> — runs on a single school server, no hosted services required</span></li>
+            <li><span class="d">·</span><span class="body"><strong style="color:var(--c-text-d)">Data stays on campus</strong> — student originals, accounts, and database remain local</span></li>
+            <li><span class="d">·</span><span class="body"><strong style="color:var(--c-text-d)">Extensible</strong> — school knowledge points, error rules, and model providers all replaceable</span></li>
+          </ul>
+        </div>
+
+        <div class="vr"></div>
+
+        <!-- Tech Choices -->
+        <div class="sc">
+          <h3 class="h4" style="margin-bottom:10px">Tech Choices <span class="dim" style="font-weight:400">· Minimal &amp; Stable</span></h3>
+          <p class="cap" style="margin-bottom:34px">No unnecessary dependencies for show — every layer independently replaceable.</p>
+
+          <div class="techgrid">
+            <div>
+              <p class="tl">Frontend</p>
+              <p class="body"><span class="en nowrap">React 19</span> · <span class="en">TypeScript</span> strict mode · <span class="en nowrap">Vite 6</span> · <span class="en nowrap">Recharts</span></p>
+            </div>
+            <div>
+              <p class="tl">Server &amp; Data</p>
+              <p class="body"><span class="en nowrap">Express 5</span> · <span class="en nowrap">SQLite</span> (<span class="en">WAL</span>) · <span class="en">Multer</span> upload type and size validation</p>
+            </div>
+            <div>
+              <p class="tl">Documents &amp; Recognition</p>
+              <p class="body"><span class="en nowrap">PDF.js</span> · <span class="en nowrap">mammoth</span> · <span class="en nowrap">word-extractor</span> · <span class="en nowrap">@napi-rs/canvas</span> server-side image conversion · vision model <span class="en">OCR</span></p>
+            </div>
+            <div>
+              <p class="tl">Models &amp; Security</p>
+              <p class="body"><span class="en">10</span> provider presets · <span class="en">OpenAI</span>-compatible vision format · <span class="en">API Key</span> encrypted server-side with <span class="en">AES-256-GCM</span> · <span class="en">scrypt</span> password hashing</p>
+            </div>
+          </div>
+
+          <hr class="rule" style="margin:34px 0 22px">
+          <p class="cap">
+            Testing &amp; Delivery &nbsp;·&nbsp; <span class="en">Vitest</span> unit tests ·
+            <span class="en">node:test</span> end-to-end verification · <span class="en">Cloudflare Worker</span> static hosting &amp; <span class="en">API</span> proxy
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════ 15 · Closing ═══════════════════════ -->
+<section class="slide" data-theme="dark"
+  data-notes="Closing. Back to that line: let every grading session become the next lesson. Then leave time for Q&A. If judges only have 30 seconds, say these three things: all numbers come from reviewed data, AI only transcribes; teachers receive a lesson plan they can use immediately; everything is open source, locally deployable, data stays on campus.">
+  <div class="amb amb-a"></div><div class="glassert"></div>
+  <div class="pad">
+    <div class="body-area center">
+      <p class="eyebrow r" style="--i:0"><span class="en">What's next</span></p>
+      <h2 class="hero r" style="--i:1;margin-top:40px;max-width:15em">
+        Let every grading session<br>become the next lesson.
+      </h2>
+      <p class="lead r" style="--i:2;margin-top:44px;max-width:34em">
+        Next steps: admin approval for teacher onboarding, email verification and password recovery, login rate limiting,
+        and recognition rate evaluation against real school samples.
+      </p>
+    </div>
+
+    <hr class="rule r" style="--i:3">
+    <div class="r" style="--i:4;margin-top:44px;display:flex;align-items:center;justify-content:space-between;gap:60px">
+      <div style="display:flex;align-items:center;gap:34px">
+        <img src="assets/qr-repo.png" alt="GitHub Repository QR Code"
+             style="width:104px;height:104px;border-radius:14px;background:#fff;padding:8px;display:block">
+        <div>
+          <p class="h4" style="margin-bottom:12px">Smart Campus Homework Analyzer</p>
+          <p class="cap"><span class="en">github.com/turtlelnc/MES-Homework</span> &nbsp;·&nbsp; <span class="en">MIT License</span> &nbsp;·&nbsp; <span class="en">v0.2.0-rc1</span></p>
+        </div>
+      </div>
+      <div style="text-align:right">
+        <p class="h4" style="margin-bottom:12px">Team B3</p>
+        <p class="cap">2026 Meisha Youth Hackathon Invitational</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+</div></div>
+
+<div id="hud"></div>
+<div id="notes"><h5>Speaker Notes</h5><p id="notesText"></p></div>
+<div id="grid"></div>
+
+<script>
+(function(){
+  const deck    = document.getElementById('deck');
+  const slides  = [...deck.querySelectorAll('.slide')];
+  const stage   = document.getElementById('stage');
+  const hud     = document.getElementById('hud');
+  const bar     = document.getElementById('bar');
+  const notes   = document.getElementById('notes');
+  const notesTx = document.getElementById('notesText');
+  const grid    = document.getElementById('grid');
+  const params  = new URLSearchParams(location.search);
+  const renderMode = params.has('render');
+
+  // Start at -1 so the first show(0) isn't swallowed by the "already active" guard
+  // (slide 1 carries `active` in the markup so a script-less view still renders it).
+  let i = -1, gridOpen = false, notesOpen = false;
+
+  /* Scale the fixed 1920×1080 canvas into the window. */
+  function fit(){
+    if (renderMode){ deck.style.transform = 'none'; return; }
+    deck.style.transform = 'scale(' + Math.min(innerWidth / 1920, innerHeight / 1080) + ')';
+  }
+  addEventListener('resize', fit);
+  fit();
+
+  /* Apple StaggeredFadeIn — restart on every slide entry. */
+  function reveal(slide, on){
+    slide.querySelectorAll('.r').forEach(el => {
+      el.classList.remove('is-in');
+      if (on){ void el.offsetWidth; el.classList.add('is-in'); }
+    });
+  }
+
+  function show(n){
+    n = Math.max(0, Math.min(slides.length - 1, n));
+    if (n === i && slides[i].classList.contains('active') && !renderMode) return;
+    slides.forEach((s, k) => {
+      const on = k === n;
+      s.classList.toggle('active', on);
+      reveal(s, on);
+    });
+    i = n;
+    notesTx.textContent = slides[i].dataset.notes || '';
+    bar.style.width = ((i + 1) / slides.length * 100) + '%';
+    hud.innerHTML = '<b>' + String(i + 1).padStart(2, '0') + '</b> / ' +
+      String(slides.length).padStart(2, '0') +
+      '&nbsp;&nbsp;<span class="kbd">←</span> <span class="kbd">→</span> navigate' +
+      '&nbsp;&nbsp;<span class="kbd">N</span> notes&nbsp;&nbsp;<span class="kbd">O</span> overview' +
+      '&nbsp;&nbsp;<span class="kbd">F</span> fullscreen';
+  }
+
+  const next = () => show(i + 1);
+  const prev = () => show(i - 1);
+
+  addEventListener('keydown', e => {
+    switch (e.key){
+      case 'ArrowRight': case 'ArrowDown': case ' ': case 'PageDown': case 'Enter':
+        e.preventDefault(); next(); break;
+      case 'ArrowLeft': case 'ArrowUp': case 'PageUp':
+        e.preventDefault(); prev(); break;
+      case 'Home': e.preventDefault(); show(0); break;
+      case 'End':  e.preventDefault(); show(slides.length - 1); break;
+      case 'n': case 'N':
+        notesOpen = !notesOpen; notes.classList.toggle('show', notesOpen); break;
+      case 'o': case 'O': toggleGrid(); break;
+      case 'f': case 'F':
+        document.fullscreenElement ? document.exitFullscreen()
+                                   : document.documentElement.requestFullscreen(); break;
+      case 'Escape':
+        if (gridOpen) toggleGrid();
+        else if (notesOpen){ notesOpen = false; notes.classList.remove('show'); }
+        break;
+    }
+  });
+
+  /* Right 60% advances, left 40% goes back. */
+  stage.addEventListener('click', e => {
+    if (gridOpen) return;
+    (e.clientX / innerWidth > 0.4 ? next : prev)();
+  });
+
+  let idle;
+  function wake(){
+    hud.classList.add('show');
+    clearTimeout(idle);
+    idle = setTimeout(() => { if (!gridOpen) hud.classList.remove('show'); }, 2600);
+  }
+  addEventListener('mousemove', wake);
+
+  /* Overview grid: live 1:1 clones of every slide, scaled to fit each tile. */
+  function scaleGrid(){
+    grid.querySelectorAll('.gwrap').forEach(w => {
+      const mini = w.firstElementChild;
+      if (mini && w.clientWidth) mini.style.transform = 'scale(' + (w.clientWidth / 1920) + ')';
+    });
+  }
+  function buildGrid(){
+    if (!grid.childElementCount){
+      slides.forEach((s, k) => {
+        const b = document.createElement('button');
+        const w = document.createElement('span'); w.className = 'gwrap';
+        const c = s.cloneNode(true);
+        c.classList.add('active', 'mini');
+        c.querySelectorAll('.r').forEach(el => el.classList.add('is-in'));
+        w.appendChild(c);
+        const t = document.createElement('span'); t.className = 'gt';
+        t.textContent = String(k + 1).padStart(2, '0');
+        b.append(w, t);
+        b.onclick = ev => { ev.stopPropagation(); toggleGrid(); show(k); };
+        grid.appendChild(b);
+      });
+    }
+    scaleGrid();
+  }
+  function toggleGrid(){
+    gridOpen = !gridOpen;
+    grid.classList.toggle('show', gridOpen);
+    if (gridOpen) buildGrid();   // build only once the tiles are measurable
+  }
+  addEventListener('resize', () => { fit(); if (gridOpen) scaleGrid(); });
+
+  if (renderMode){
+    document.body.classList.add('render');
+    const n = Math.max(0, Math.min(slides.length - 1, parseInt(params.get('render'), 10) || 0));
+    slides.forEach((s, k) => {
+      s.classList.toggle('active', k === n);
+      s.querySelectorAll('.r').forEach(el => el.classList.add('is-in'));
+    });
+    window.__READY__ = true;
+  } else {
+    show(0);
+    wake();
+  }
+})();
+</script>
+</body>
+</html>

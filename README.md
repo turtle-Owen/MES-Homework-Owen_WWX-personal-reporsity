@@ -2,7 +2,9 @@
 
 **v0.2.0-rc1** ｜ MIT License
 
-校园作业分析器：上传作业，AI 识别批改，教师复核后自动生成班级学情、知识点掌握率、错因统计与讲评课方案。所有数字由已复核数据确定性计算，AI 只负责转写成课堂语言。  Smart Campus Homework Analyzer: upload homework, AI grades it; teacher review turns it into class insight - mastery, error causes, a lesson plan. All numbers come from reviewed data; AI only writes them up for class.
+[English](README.EN.md) | 中文
+
+校园作业分析器：上传作业，AI 识别批改，教师复核后自动生成班级学情、知识点掌握率、错因统计与讲评课方案。所有数字由已复核数据确定性计算，AI 只负责转写成课堂语言。
 
 ---
 
@@ -106,3 +108,28 @@ npx wrangler deploy
 - SQLite 适合单机或单写节点；多节点需要迁移到外部数据库和对象存储。
 
 模型能力和接口格式会变化。当前 OCR 使用 OpenAI 兼容的视觉消息格式；不兼容该格式的厂商需要增加独立适配器。
+
+## 目录结构 / Directory Structure
+
+| 目录 | 说明 |
+|------|------|
+| `src/` | 前端源码（React + TypeScript） |
+| `server/` | 服务端（Express + SQLite） |
+| `public/` | 静态资源 |
+| `tools/` | 部署工具与脚本 |
+| `Roadshow PPT - 路演PPT/` | 路演演示文稿及素材（含中英文两套 PPTX / PDF / 网页源文件） |
+
+| 文档 | 说明 |
+|------|------|
+| `README.md` / `README.EN.md` | 项目说明（中文 / English） |
+| `SAFETY.zh.md` / `SAFETY.md` | 安全性声明与负责任使用指南（中文 / English） |
+| `AGENTS.md` | 仓库协作与代码规范 |
+| `Roadshow PPT - 路演PPT/README.md` / `README.EN.md` | 路演 PPT 使用说明（中文 / English） |
+
+> **注意**：`src`、`server`、`public`、`tools` 为代码标准目录，保持原名以确保构建正常。非代码目录已采用中英混合命名。
+
+## 安全性声明
+
+本项目为 **DeepSeek V4.1-Flash** 与 **Qwen 3.8 Max**（在 DeepSeek Harness 上运行）和 **GPT 6 Sol**（在 Codex 上）辅助完成。所有 AI 生成的输出均已由开发者审核、验证并整合，开发者对最终代码库和文档保留完整的著作权和责任。
+
+详细的安全信息、负责任使用指南和数据隐私注意事项请参阅 [SAFETY.zh.md](SAFETY.zh.md)（[English](SAFETY.md)）。
