@@ -26,6 +26,36 @@
 
 统计口径说明：只有教师在“识别与复核”确认过的错题进入统计；判为“无法辨认”的题目单独列出，不计入学生错因占比，避免因为扫描不清而误判学生掌握情况。
 
+## 项目组
+
+本项目作为中山梅沙实验学校的首届梅沙黑客松限时完成的参赛作品，获得了 **最高奖项（智创校园大奖）** 。
+具体内容：[中山梅沙实验学校的公众号文章：36小时，我们见证了一场狂欢](https://mp.weixin.qq.com/s/H2DiIkaNx56Y_fUoRV-HzA)
+
+
+B3组 校园作业分析器
+
+导师：陈银香  
+组员：欧阳进达、吴汶轩、胡以琳、程诺、黎敦文  
+项目后期维护组（贡献者）：WWX、ZYH、CN  
+[![turtle-Owen](https://github.com/turtle-Owen.png?size=50)](https://github.com/turtle-Owen)  
+[![Tom505915-Zhang](https://github.com/Tom505915-Zhang.png?size=50)](https://github.com/Tom505915-Zhang)
+
+
+![Logo](微信图片_2026-10-11_112449_801.jpg)
+
+![Logo](641.jpg)
+
+![Logo](640.png)
+
+
+
+## 安全性声明
+
+本项目为 **DeepSeek V4.1-Flash** 与 **Qwen 3.8 Max**（在 DeepSeek Harness 上运行）和 **GPT 6 Sol**（在 Codex 上）辅助完成。所有 AI 生成的输出均已由开发者审核、验证并整合，开发者对最终代码库和文档保留完整的著作权和责任。
+
+详细的安全信息、负责任使用指南和数据隐私注意事项请参阅 [SAFETY.zh.md](SAFETY.zh.md)（[English](SAFETY.md)）。
+
+
 ## rc5 能力
 
 - 独立注册学校管理员账户；学校账户不设置学段、学科或班级，用于查看全校数据并创建教师、学生账户。
@@ -128,8 +158,3 @@ npx wrangler deploy
 
 > **注意**：`src`、`server`、`public`、`tools` 为代码标准目录，保持原名以确保构建正常。非代码目录已采用中英混合命名。
 
-## 安全性声明
-
-本项目为 **DeepSeek V4.1-Flash** 与 **Qwen 3.8 Max**（在 DeepSeek Harness 上运行）和 **GPT 6 Sol**（在 Codex 上）辅助完成。所有 AI 生成的输出均已由开发者审核、验证并整合，开发者对最终代码库和文档保留完整的著作权和责任。
-
-详细的安全信息、负责任使用指南和数据隐私注意事项请参阅 [SAFETY.zh.md](SAFETY.zh.md)（[English](SAFETY.md)）。
