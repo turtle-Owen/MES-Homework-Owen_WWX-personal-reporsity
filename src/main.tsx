@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   BarChart3,
@@ -24,6 +24,14 @@ import {
   Users,
 } from "lucide-react";
 import { api, json } from "./api";
+import {
+  changeReviewGrade,
+  createReviewGuard,
+  normalizeReviewDetail,
+  reviewRows,
+  reviewScoreError,
+  type ReviewItem,
+} from "./review-state";
 import { Button } from "./components/ui/button";
 import { TeachingAnalysis } from "./TeachingAnalysis";
 import "./styles.css";
@@ -791,10 +799,10 @@ function Assignments({
             <UploadCloud />
             <strong>
               {files?.length
-                ? `已选择 ${files.length} 个文件`
+                ? `同一份答卷：已选择 ${files.length} 个文件`
                 : "选择真实作业原件"}
             </strong>
-            <span>上传后由教师主动开始 OCR</span>
+            <span>请按页序选择同一位学生的全部答卷文件，再由教师开始 OCR</span>
             <input
               type="file"
               accept="image/jpeg,image/png,image/webp,application/pdf,.docx,.doc,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -1147,56 +1155,127 @@ function StudentsPage({
 function Review({ notify }: { notify: (s: string) => void }) {
   const [items, setItems] = useState<Submission[]>([]),
     [detail, setDetail] = useState<any>(null),
-    [busy, setBusy] = useState("");
-  const load = () => api<Submission[]>("/submissions").then(setItems);
-  useEffect(() => {
-    load();
-  }, []);
-  const recognize = async (id: string) => {
-    setBusy(id);
+    [busy, setBusy] = useState<Record<string, string>>({}),
+    [loading, setLoading] = useState(false);
+  const guard = useRef(createReviewGuard()).current;
+  const listGeneration = useRef(0);
+  const load = async () => {
+    const generation = ++listGeneration.current;
     try {
-      const r: any = await api(`/submissions/${id}/recognize`, {
-        method: "POST",
-      });
-      setDetail((d: any) => ({
-        ...d,
-        status: "review",
-        analysis: r,
-        ocr_text: r.ocrText,
-      }));
-      notify("逐页 OCR 完成，请逐题复核。");
+      const result = await api<Submission[]>("/submissions");
+      if (generation === listGeneration.current) setItems(result);
+    } catch (e) {
+      if (generation === listGeneration.current) notify((e as Error).message);
+    }
+  };
+  useEffect(() => {
+    void load();
+    return () => {
+      guard.select(null);
+      ++listGeneration.current;
+    };
+  }, []);
+  const select = async (id: string) => {
+    const ticket = guard.select(id);
+    setDetail(null);
+    setLoading(true);
+    try {
+      const result = await api<any>(`/submissions/${id}`);
+      if (guard.isCurrent(ticket)) setDetail(normalizeReviewDetail(result));
+    } catch (e) {
+      if (guard.isCurrent(ticket)) notify((e as Error).message);
+    } finally {
+      if (guard.isCurrent(ticket)) setLoading(false);
+    }
+  };
+  const finish = (
+    ticket: NonNullable<ReturnType<typeof guard.startOperation>>,
+  ) => {
+    if (!guard.finishOperation(ticket)) return;
+    setBusy((state) => {
+      const next = { ...state };
+      delete next[ticket.id!];
+      return next;
+    });
+    void load();
+  };
+  const recognize = async (id: string) => {
+    const operation = guard.startOperation(id);
+    if (!operation) return;
+    setBusy((state) => ({ ...state, [id]: "recognize" }));
+    try {
+      await api(`/submissions/${id}/recognize`, { method: "POST" });
+      // Reload canonical status and scores instead of merging a result into another draft.
+      if (guard.current().id === id) {
+        // A fresh generation also supersedes a pending GET from reselecting A.
+        await select(id);
+        if (guard.current().id === id) notify("逐页 OCR 完成，请逐题复核。");
+      }
     } catch (e) {
       notify((e as Error).message);
     } finally {
-      setBusy("");
-      load();
+      finish(operation);
     }
   };
-  const update = (i: number, key: string, value: any) =>
-    setDetail((d: any) => ({
-      ...d,
-      analysis: {
-        ...d.analysis,
-        items: d.analysis.items.map((x: any, n: number) =>
-          n === i ? { ...x, [key]: value } : x,
-        ),
-      },
-    }));
+  const update = (questionId: string, key: string, value: any) =>
+    setDetail((d: any) => {
+      if (!d || busy[d.id]) return d;
+      const question = d.questions?.find((q: any) => q.id === questionId);
+      if (!question) return d;
+      return {
+        ...d,
+        analysis: {
+          ...d.analysis,
+          items: d.analysis.items.map((item: ReviewItem) =>
+            item.questionId !== questionId
+              ? item
+              : key === "isCorrect"
+                ? changeReviewGrade(item, question, { isCorrect: value })
+                : key === "score"
+                  ? changeReviewGrade(item, question, { score: value })
+                  : { ...item, [key]: value },
+          ),
+        },
+      };
+    });
   const approve = async () => {
-    await api(
-      `/submissions/${detail.id}/review`,
-      json("POST", {
-        ...detail.analysis,
-        score: detail.analysis?.items?.reduce(
-          (a: number, x: any) => a + (Number(x.score) || 0),
-          0,
-        ),
-      }),
+    const draft = detail;
+    if (!draft || draft.status !== "review") return;
+    const error = reviewScoreError(
+      draft.questions || [],
+      draft.analysis?.items || [],
     );
-    notify("复核完成，错题已写入学生账户。");
-    setDetail(null);
-    load();
+    if (error) return notify(error);
+    const operation = guard.startOperation(draft.id);
+    if (!operation) return;
+    setBusy((state) => ({ ...state, [draft.id]: "review" }));
+    try {
+      await api(
+        `/submissions/${draft.id}/review`,
+        json("POST", {
+          ...draft.analysis,
+          items: draft.analysis.items.map((item: ReviewItem) => ({
+            ...item,
+            score: Number(item.score),
+          })),
+        }),
+      );
+      notify("复核完成，错题已写入学生账户。");
+      if (guard.current().id === draft.id) {
+        guard.select(null);
+        setDetail(null);
+        setLoading(false);
+      }
+    } catch (e) {
+      notify((e as Error).message);
+    } finally {
+      finish(operation);
+    }
   };
+  const review = reviewRows(
+    detail?.questions || [],
+    detail?.analysis?.items || [],
+  );
   return (
     <>
       <Title
@@ -1210,10 +1289,7 @@ function Review({ notify }: { notify: (s: string) => void }) {
           {items.length ? (
             <div className="select-list">
               {items.map((x) => (
-                <button
-                  key={x.id}
-                  onClick={() => api(`/submissions/${x.id}`).then(setDetail)}
-                >
+                <button key={x.id} onClick={() => select(x.id)}>
                   <div>
                     <strong>
                       {x.student_name} · {x.assignment_title}
@@ -1233,7 +1309,9 @@ function Review({ notify }: { notify: (s: string) => void }) {
         </section>
         <section className="rc4-panel review-detail">
           {!detail ? (
-            <Empty text="选择提交查看识别状态。" />
+            <Empty
+              text={loading ? "正在加载答卷…" : "选择提交查看识别状态。"}
+            />
           ) : (
             <>
               <div className="detail-head">
@@ -1241,13 +1319,16 @@ function Review({ notify }: { notify: (s: string) => void }) {
                   <h2>{detail.student_name}</h2>
                   <p>{statusName(detail.status)}</p>
                 </div>
-                {["uploaded", "failed"].includes(detail.status) && (
+                {(["uploaded", "failed"].includes(detail.status) ||
+                  (detail.status === "review" && !!review.error)) && (
                   <Button
-                    disabled={busy === detail.id}
+                    disabled={!!busy[detail.id]}
                     onClick={() => recognize(detail.id)}
                   >
                     <RefreshCw />
-                    {busy ? "逐页 OCR 中…" : "开始 OCR"}
+                    {busy[detail.id] === "recognize"
+                      ? "逐页 OCR 中…"
+                      : "开始 OCR"}
                   </Button>
                 )}
               </div>
@@ -1257,20 +1338,30 @@ function Review({ notify }: { notify: (s: string) => void }) {
                   <textarea rows={7} value={detail.ocr_text} readOnly />
                 </label>
               )}
-              {detail.analysis?.items?.map((x: any, i: number) => (
-                <div className="review-item" key={i}>
+              {detail.analysis && review.error && (
+                <p role="alert">{review.error}</p>
+              )}
+              {review.rows.map(({ question, item: x }) => (
+                <fieldset
+                  className="review-item"
+                  key={question.id}
+                  disabled={!!busy[detail.id]}
+                >
                   <div>
-                    <strong>第 {i + 1} 题</strong>
+                    <strong>
+                      第 {question.number} 题 · 满分 {question.score}
+                    </strong>
                     <span className={(x.confidence || 0) < 0.8 ? "low" : ""}>
                       置信度 {Math.round((x.confidence || 0) * 100)}%
                     </span>
                   </div>
+                  <p>{question.prompt}</p>
                   <label>
                     学生答案
                     <textarea
                       value={x.studentAnswer || ""}
                       onChange={(e) =>
-                        update(i, "studentAnswer", e.target.value)
+                        update(question.id, "studentAnswer", e.target.value)
                       }
                     />
                   </label>
@@ -1278,22 +1369,45 @@ function Review({ notify }: { notify: (s: string) => void }) {
                     订正说明
                     <textarea
                       value={x.correction || ""}
-                      onChange={(e) => update(i, "correction", e.target.value)}
+                      onChange={(e) =>
+                        update(question.id, "correction", e.target.value)
+                      }
                     />
                   </label>
                   <label className="check">
                     <input
                       type="checkbox"
-                      checked={!!x.isCorrect}
-                      onChange={(e) => update(i, "isCorrect", e.target.checked)}
+                      checked={x.isCorrect === true}
+                      onChange={(e) =>
+                        update(question.id, "isCorrect", e.target.checked)
+                      }
                     />
                     判为正确
                   </label>
-                </div>
+                  <label className="field">
+                    <span>得分（0–{question.score}）</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={question.score}
+                      step="any"
+                      value={x.score ?? ""}
+                      onChange={(e) =>
+                        update(question.id, "score", e.target.value)
+                      }
+                    />
+                  </label>
+                </fieldset>
               ))}
               {detail.status === "review" && (
-                <Button className="full" onClick={approve}>
-                  确认复核并写入错题本
+                <Button
+                  className="full"
+                  disabled={!!busy[detail.id] || !!review.error}
+                  onClick={approve}
+                >
+                  {busy[detail.id] === "review"
+                    ? "正在保存复核…"
+                    : "确认复核并写入错题本"}
                 </Button>
               )}
             </>
@@ -1483,6 +1597,12 @@ function Mistakes({ notify }: { notify: (message: string) => void }) {
     setBusy(id);
     try {
       await api(`/mistakes/${id}/practice/generate`, { method: "POST" });
+      setAnswers((current) => ({ ...current, [id]: [] }));
+      setResults((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
       await load();
       notify("已生成一组新的同类型练习。");
     } catch (error) {

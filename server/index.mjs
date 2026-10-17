@@ -27,6 +27,12 @@ import {
 } from "./analysis.mjs";
 import readXlsxFile from "read-excel-file/node";
 import {
+  normalizeReview,
+  publicPractice,
+  studentAnalysis,
+  practiceGrade,
+} from "./grading.mjs";
+import {
   providerEndpoint,
   sameOriginWrites,
   authRateLimit,
@@ -879,11 +885,31 @@ function submissionFor(req) {
       : null;
 }
 
+function submissionFiles(submission) {
+  const rows = db
+    .prepare(
+      "SELECT * FROM submission_files WHERE submission_id=? ORDER BY position",
+    )
+    .all(submission.id);
+  return rows.length
+    ? rows
+    : [
+        {
+          file_path: submission.file_path,
+          file_type: submission.file_type,
+          original_name: path.basename(submission.file_path),
+          position: 0,
+        },
+      ];
+}
+
 // Uploaded student work is private, including legacy /uploads URLs.
 app.get("/uploads/:name", auth, (req, res) => {
   const s = db
-    .prepare("SELECT id FROM submissions WHERE file_path=?")
-    .get(path.join(files, req.params.name));
+    .prepare(
+      "SELECT id FROM submissions WHERE file_path=? UNION SELECT submission_id AS id FROM submission_files WHERE file_path=?",
+    )
+    .get(path.join(files, req.params.name), path.join(files, req.params.name));
   if (!s || !submissionFor({ ...req, params: { id: s.id } }))
     return res.status(404).json({ error: "文件不存在" });
   res.setHeader("Content-Disposition", "attachment");
@@ -945,31 +971,46 @@ app.post(
       return res.status(400).json({ error: "学生不属于作业班级" });
     if (!req.files?.length)
       return res.status(400).json({ error: "请选择支持的作业文件" });
-    const rows = [];
+    const id = uid();
     const saved = [];
     db.exec("BEGIN");
     try {
-      for (const f of req.files || []) {
-        const id = uid(),
-          target = path.join(files, `${id}${f.safeExtension}`);
-        fs.renameSync(f.path, target);
+      const attachments = req.files.map((file, index) => ({
+        file,
+        target: path.join(files, `${uid()}${file.safeExtension}`),
+        index,
+      }));
+      db.prepare(
+        "INSERT INTO submissions(id,assignment_id,student_id,student_name,file_path,file_type,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+      ).run(
+        id,
+        a.id,
+        linkedStudent?.id || null,
+        linkedStudent?.name || req.body.studentName || req.user.name,
+        attachments[0].target,
+        attachments[0].file.mimetype,
+        "uploaded",
+        iso(),
+      );
+      const insertFile = db.prepare(
+        "INSERT INTO submission_files VALUES(?,?,?,?,?,?)",
+      );
+      for (const { file, target, index } of attachments) {
+        fs.renameSync(file.path, target);
         saved.push(target);
-        db.prepare(
-          "INSERT INTO submissions(id,assignment_id,student_id,student_name,file_path,file_type,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
-        ).run(
+        insertFile.run(
+          uid(),
           id,
-          a.id,
-          linkedStudent?.id || null,
-          linkedStudent?.name || req.body.studentName || req.user.name,
+          index,
           target,
-          f.mimetype,
-          "uploaded",
-          iso(),
+          file.mimetype,
+          file.originalname,
         );
-        rows.push({ id, name: f.originalname });
       }
       db.exec("COMMIT");
-      res.json(rows);
+      res.json([
+        { id, name: req.files[0].originalname, fileCount: attachments.length },
+      ]);
     } catch (error) {
       db.exec("ROLLBACK");
       saved.forEach((file) => fs.rmSync(file, { force: true }));
@@ -989,19 +1030,27 @@ app.get("/api/submissions", auth, teacher, (req, res) =>
 app.get("/api/submissions/:id", auth, (req, res) => {
   const s = submissionFor(req);
   if (!s) return res.status(404).json({ error: "提交不存在" });
+  const student = req.user.role === "student";
+  const visible = !student || s.teacher_reviewed;
+  const parsed =
+    visible && s.analysis_json ? JSON.parse(s.analysis_json) : null;
+  const analysis = student ? studentAnalysis(parsed) : parsed;
   res.json({
     ...s,
     file_path: undefined,
-    analysis_json:
-      req.user.role === "student" && !s.teacher_reviewed
-        ? null
-        : s.analysis_json,
-    ocr_text:
-      req.user.role === "student" && !s.teacher_reviewed ? null : s.ocr_text,
-    analysis:
-      s.analysis_json && (req.user.role !== "student" || s.teacher_reviewed)
-        ? JSON.parse(s.analysis_json)
-        : null,
+    files: submissionFiles(s).map((file) => ({
+      name: file.original_name,
+      mimeType: file.file_type,
+      url: `/uploads/${encodeURIComponent(path.basename(file.file_path))}`,
+    })),
+    questions: db
+      .prepare(
+        "SELECT id,number,prompt,score FROM questions WHERE assignment_id=? ORDER BY number",
+      )
+      .all(s.assignment_id),
+    analysis_json: analysis ? JSON.stringify(analysis) : null,
+    ocr_text: visible ? s.ocr_text : null,
+    analysis,
   });
 });
 const recognitionJobs = new Set();
@@ -1024,13 +1073,33 @@ app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
         "SELECT q.*,k.title knowledge_title FROM questions q LEFT JOIN knowledge k ON k.id=q.knowledge_id WHERE assignment_id=? ORDER BY number",
       )
       .all(s.assignment_id);
-    const word = isWordDocument(s.file_type, s.file_path)
-      ? await extractWordDocument(s.file_path, s.file_type, s.file_path)
-      : null;
-    const prompt = `学校作业 OCR、自动批改与个性化练习。学段=${s.stage}，学科=${s.subject}。\n教师已经录入的正式题目=${JSON.stringify(qs)}。\n${word ? `学生 Word 答卷已提取文字：\n${word.text}\n` : "学生答卷页面已附在消息中。"}\n规则：1. 忠实识别学生实际填写内容；2. 只能按 questionId 对齐正式题目；3. 无法辨认写[无法辨认]且 confidence 低于0.5；4. 自动判断正误和得分；5. 错题必须生成分步解析、错误原因、订正答案，以及2道同知识点同题型但数值或情境不同的练习题；6. 每个正式题目恰好返回一项。\n只返回 JSON：{"ocrText":"完整识别原文","items":[{"questionId":"题目id","knowledgeId":"知识点id","studentAnswer":"学生答案","isCorrect":false,"score":0,"reason":"错误原因","correction":"正确答案","explanation":"分步题目解析","confidence":0.0,"practiceQuestions":[{"prompt":"同类题","answer":"答案","explanation":"解析"}]}]}`;
-    const images = word
-      ? word.images
-      : await documentImages(s.file_path, s.file_type);
+    const images = [];
+    const texts = [];
+    for (const [index, file] of submissionFiles(s).entries()) {
+      if (isWordDocument(file.file_type, file.file_path)) {
+        const word = await extractWordDocument(
+          file.file_path,
+          file.file_type,
+          file.file_path,
+        );
+        texts.push(`附件 ${index + 1}：${word.text}`);
+        images.push(...word.images);
+      } else {
+        images.push(
+          ...(await documentImages(
+            file.file_path,
+            file.file_type,
+            10 - images.length,
+          )),
+        );
+      }
+      if (images.length > 10 || texts.join("\n").length > 1000000)
+        throw new Error(
+          "整份答卷最多 10 页图片，文字不得超过 100 万字符，请拆分或压缩后重试",
+        );
+    }
+    const documentText = texts.join("\n");
+    const prompt = `学校作业 OCR、自动批改与个性化练习。学段=${s.stage}，学科=${s.subject}。\n教师已经录入的正式题目=${JSON.stringify(qs)}。\n${documentText ? `答卷文字（按附件顺序）：\n${documentText}\n` : "学生答卷页面已附在消息中。"}\n规则：1. 忠实识别学生实际填写内容；2. 只能按 questionId 对齐正式题目；3. 无法辨认写[无法辨认]且 confidence 低于0.5；4. 自动判断正误和得分；5. 错题必须生成分步解析、错误原因、订正答案，以及2道同知识点同题型但数值或情境不同的练习题；6. 每个正式题目恰好返回一项。\n只返回 JSON：{"ocrText":"完整识别原文","items":[{"questionId":"题目id","knowledgeId":"知识点id","studentAnswer":"学生答案","isCorrect":false,"score":0,"reason":"错误原因","correction":"正确答案","explanation":"分步题目解析","confidence":0.0,"practiceQuestions":[{"prompt":"同类题","answer":"答案","explanation":"解析"}]}]}`;
     const parsed = await askModel(req.user.id, prompt, images);
     db.prepare(
       "UPDATE submissions SET status='review',teacher_reviewed=0,score=NULL,ocr_text=?,analysis_json=? WHERE id=?",
@@ -1053,29 +1122,24 @@ app.post("/api/submissions/:id/review", auth, teacher, (req, res) => {
   if (recognitionJobs.has(s.id))
     return res.status(409).json({ error: "请等待识别完成后再复核" });
   const questions = db
-    .prepare("SELECT id,knowledge_id FROM questions WHERE assignment_id=?")
+    .prepare(
+      "SELECT id,knowledge_id,score FROM questions WHERE assignment_id=? ORDER BY number",
+    )
     .all(s.assignment_id);
   const questionMap = new Map(questions.map((q) => [q.id, q.knowledge_id]));
-  const items = req.body.items;
-  if (
-    !Array.isArray(items) ||
-    items.length !== questions.length ||
-    new Set(items.map((item) => item?.questionId)).size !== questions.length ||
-    items.some(
-      (item) =>
-        !item ||
-        !questionMap.has(item.questionId) ||
-        typeof item.isCorrect !== "boolean",
-    )
-  )
-    return res.status(400).json({ error: "复核题目必须与本作业一致且不重复" });
+  let reviewed;
+  try {
+    reviewed = normalizeReview(req.body.items, questions);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
   db.exec("BEGIN");
   try {
     db.prepare("DELETE FROM mistakes WHERE submission_id=?").run(s.id);
     const ins = db.prepare(
       "INSERT INTO mistakes(id,submission_id,student_id,question_id,knowledge_id,reason,student_answer,correction,created_at,explanation,practice_json,mastery) VALUES(?,?,?,?,?,?,?,?,?,?,?,0)",
     );
-    for (const x of (req.body.items || []).filter((v) => !v.isCorrect))
+    for (const x of reviewed.items.filter((v) => !v.isCorrect))
       ins.run(
         uid(),
         s.id,
@@ -1091,7 +1155,15 @@ app.post("/api/submissions/:id/review", auth, teacher, (req, res) => {
       );
     db.prepare(
       "UPDATE submissions SET analysis_json=?,teacher_reviewed=1,status='completed',score=? WHERE id=?",
-    ).run(JSON.stringify(req.body), Number(req.body.score) || 0, s.id);
+    ).run(
+      JSON.stringify({
+        ...req.body,
+        items: reviewed.items,
+        score: reviewed.score,
+      }),
+      reviewed.score,
+      s.id,
+    );
     db.exec("COMMIT");
     res.json({ ok: true });
   } catch (e) {
@@ -1105,15 +1177,18 @@ app.get("/api/mistakes", auth, (req, res) => {
   // 无论教师还是学生，都必须同时落在本校范围内，避免跨校读取错题。
   const scope =
     req.user.role === "student"
-      ? "a.school_id=? AND m.student_id=?"
-      : "a.school_id=? AND a.teacher_id=?";
+      ? "a.school_id=? AND m.student_id=? AND s.teacher_reviewed=1"
+      : "a.school_id=? AND a.teacher_id=? AND s.teacher_reviewed=1";
   const rows = db
     .prepare(base + scope + " ORDER BY m.created_at DESC")
     .all(req.user.school_id, req.user.id);
   res.json(
     rows.map((row) => ({
       ...row,
-      practiceQuestions: row.practice_json ? JSON.parse(row.practice_json) : [],
+      practiceQuestions:
+        req.user.role === "student"
+          ? publicPractice(safeParse(row.practice_json, []))
+          : safeParse(row.practice_json, []),
       practice_json: undefined,
     })),
   );
@@ -1123,9 +1198,9 @@ app.post("/api/mistakes/:id/practice/generate", auth, async (req, res) => {
     return res.status(403).json({ error: "仅学生可生成过关练习" });
   const mistake = db
     .prepare(
-      "SELECT m.*,q.prompt,q.standard_answer,k.title knowledge_title,a.stage,a.subject FROM mistakes m JOIN questions q ON q.id=m.question_id JOIN submissions s ON s.id=m.submission_id JOIN assignments a ON a.id=s.assignment_id LEFT JOIN knowledge k ON k.id=m.knowledge_id WHERE m.id=? AND m.student_id=?",
+      "SELECT m.*,q.prompt,q.standard_answer,k.title knowledge_title,a.stage,a.subject FROM mistakes m JOIN questions q ON q.id=m.question_id JOIN submissions s ON s.id=m.submission_id JOIN assignments a ON a.id=s.assignment_id LEFT JOIN knowledge k ON k.id=m.knowledge_id WHERE m.id=? AND m.student_id=? AND s.teacher_reviewed=1 AND a.school_id=?",
     )
-    .get(req.params.id, req.user.id);
+    .get(req.params.id, req.user.id, req.user.school_id);
   if (!mistake) return res.status(404).json({ error: "错题不存在" });
   try {
     const generated = await askModel(
@@ -1136,11 +1211,16 @@ app.post("/api/mistakes/:id/practice/generate", auth, async (req, res) => {
       ? generated.questions.slice(0, 5)
       : [];
     if (!questions.length) throw new Error("模型没有生成练习题");
-    db.prepare("UPDATE mistakes SET practice_json=?,mastery=0 WHERE id=?").run(
-      JSON.stringify(questions),
-      mistake.id,
-    );
-    res.json({ questions });
+    const changed = db
+      .prepare(
+        "UPDATE mistakes SET practice_json=?,mastery=0 WHERE id=? AND practice_json IS ? AND EXISTS(SELECT 1 FROM submissions WHERE id=mistakes.submission_id AND teacher_reviewed=1)",
+      )
+      .run(JSON.stringify(questions), mistake.id, mistake.practice_json);
+    if (!changed.changes)
+      return res
+        .status(409)
+        .json({ error: "题目或复核状态已变化，请刷新后重试" });
+    res.json({ questions: publicPractice(questions) });
   } catch (error) {
     res.status(502).json({ error: error.message || "练习生成失败" });
   }
@@ -1149,8 +1229,10 @@ app.post("/api/mistakes/:id/practice/submit", auth, async (req, res) => {
   if (req.user.role !== "student")
     return res.status(403).json({ error: "仅学生可提交过关练习" });
   const mistake = db
-    .prepare("SELECT * FROM mistakes WHERE id=? AND student_id=?")
-    .get(req.params.id, req.user.id);
+    .prepare(
+      "SELECT m.* FROM mistakes m JOIN submissions s ON s.id=m.submission_id JOIN assignments a ON a.id=s.assignment_id WHERE m.id=? AND m.student_id=? AND s.teacher_reviewed=1 AND a.school_id=?",
+    )
+    .get(req.params.id, req.user.id, req.user.school_id);
   if (!mistake) return res.status(404).json({ error: "错题不存在" });
   const questions = mistake.practice_json
     ? JSON.parse(mistake.practice_json)
@@ -1158,20 +1240,31 @@ app.post("/api/mistakes/:id/practice/submit", auth, async (req, res) => {
   if (!questions.length)
     return res.status(400).json({ error: "请先生成同类练习" });
   const answers = Array.isArray(req.body.answers) ? req.body.answers : [];
+  if (
+    !Array.isArray(req.body.answers) ||
+    answers.length !== questions.length ||
+    answers.some(
+      (answer) =>
+        typeof answer !== "string" || !answer.trim() || answer.length > 10000,
+    )
+  )
+    return res.status(400).json({ error: "请完整填写每道练习的答案" });
   try {
     const graded = await askModel(
       req.user.id,
       `请严格批改过关练习。题目与参考答案=${JSON.stringify(questions)}。学生答案=${JSON.stringify(answers)}。语义等价或计算过程正确可判正确；不要因表达形式不同误判。只返回JSON：{"results":[{"correct":true,"feedback":"简短反馈"}],"passed":true}。passed 仅在全部题目正确时为 true。`,
     );
-    const passed =
-      Boolean(graded.passed) &&
-      graded.results?.length === questions.length &&
-      graded.results.every((item) => item.correct);
-    db.prepare("UPDATE mistakes SET mastery=? WHERE id=?").run(
-      passed ? 1 : 0,
-      mistake.id,
-    );
-    res.json({ ...graded, passed });
+    const result = practiceGrade(graded, questions.length);
+    const changed = db
+      .prepare(
+        "UPDATE mistakes SET mastery=? WHERE id=? AND practice_json=? AND EXISTS(SELECT 1 FROM submissions WHERE id=mistakes.submission_id AND teacher_reviewed=1)",
+      )
+      .run(result.passed ? 1 : 0, mistake.id, mistake.practice_json);
+    if (!changed.changes)
+      return res
+        .status(409)
+        .json({ error: "题目或复核状态已变化，请刷新后重试" });
+    res.json(result);
   } catch (error) {
     res.status(502).json({ error: error.message || "练习批改失败" });
   }
@@ -1179,7 +1272,7 @@ app.post("/api/mistakes/:id/practice/submit", auth, async (req, res) => {
 app.post("/api/papers/generate", auth, teacher, (req, res) => {
   const rows = db
     .prepare(
-      "SELECT DISTINCT q.id,q.prompt,q.standard_answer,k.title knowledge_title FROM mistakes m JOIN questions q ON q.id=m.question_id JOIN submissions s ON s.id=m.submission_id JOIN assignments a ON a.id=s.assignment_id LEFT JOIN knowledge k ON k.id=m.knowledge_id WHERE a.teacher_id=? ORDER BY RANDOM() LIMIT ?",
+      "SELECT DISTINCT q.id,q.prompt,q.standard_answer,k.title knowledge_title FROM mistakes m JOIN questions q ON q.id=m.question_id JOIN submissions s ON s.id=m.submission_id JOIN assignments a ON a.id=s.assignment_id LEFT JOIN knowledge k ON k.id=m.knowledge_id WHERE a.teacher_id=? AND s.teacher_reviewed=1 ORDER BY RANDOM() LIMIT ?",
     )
     .all(
       req.user.id,

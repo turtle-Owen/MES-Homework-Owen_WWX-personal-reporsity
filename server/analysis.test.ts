@@ -8,7 +8,10 @@ import {
   promptPayload,
   reasonTypeIds,
 } from "./analysis.mjs";
-import { createFixtureDatabase, fixtureQuestions } from "./analysis.fixture.mjs";
+import {
+  createFixtureDatabase,
+  fixtureQuestions,
+} from "./analysis.fixture.mjs";
 
 const load = (db, fixture) => {
   const data = loadAssignmentData(db, {
@@ -51,12 +54,14 @@ describe("错因归类", () => {
     // 错因文本与答案都无法判定时，必须交回教师，而不是默认当成空题
     expect(classifyReason("再接再厉。").id).toBe("other");
     expect(classifyReason("hello").id).toBe("other");
-    expect(classifyReason("再接再厉。", { studentAnswer: "AB" }).id).toBe("other");
+    expect(classifyReason("再接再厉。", { studentAnswer: "AB" }).id).toBe(
+      "other",
+    );
     // 确凿的空答案才归为空题
     expect(classifyReason("", { studentAnswer: "未作答" }).id).toBe("blank");
-    expect(classifyReason("这道题写得不错", { studentAnswer: "未作答" }).id).toBe(
-      "blank",
-    );
+    expect(
+      classifyReason("这道题写得不错", { studentAnswer: "未作答" }).id,
+    ).toBe("blank");
   });
 
   it("每个错因都有课堂提示与颜色，供前端直接渲染", () => {
@@ -69,14 +74,200 @@ describe("错因归类", () => {
 });
 
 describe("班级学情统计", () => {
+  const fixtureData = () => {
+    const { db, fixture } = createFixtureDatabase();
+    return loadAssignmentData(db, {
+      teacherId: fixture.teacherId,
+      assignmentId: fixture.assignmentId,
+    });
+  };
+
+  it("全班满分时仍保留所有复核学生及100%掌握的知识点", () => {
+    const data = fixtureData();
+    data.mistakes = [];
+    for (const item of data.reviewed) item.score = null;
+    const stats = buildAssignmentStats(data);
+    expect(stats.overview.studentCount).toBe(2);
+    expect(stats.overview.mistakeCount).toBe(0);
+    expect(
+      stats.students.every(
+        (item) => item.mistakeCount === 0 && item.errorRate === 0,
+      ),
+    ).toBe(true);
+    expect(
+      stats.students.every((item) => item.score === stats.overview.totalScore),
+    ).toBe(true);
+    expect(stats.knowledgePoints.length).toBe(
+      new Set(data.questions.map((item) => item.knowledge_id)).size,
+    );
+    expect(
+      stats.knowledgePoints.every(
+        (point) => point.correctRate === 1 && point.total > 0,
+      ),
+    ).toBe(true);
+  });
+
+  it("部分满分时分母仍包含满分学生，且满分学生没有错因", () => {
+    const data = fixtureData();
+    const fullMark = data.reviewed[0];
+    data.mistakes = data.mistakes.filter(
+      (item) => item.submission_id !== fullMark.id,
+    );
+    fullMark.score = null;
+    const stats = buildAssignmentStats(data);
+    expect(stats.overview.studentCount).toBe(2);
+    const student = stats.students.find(
+      (item) => item.studentId === fullMark.student_id,
+    );
+    expect(student).toMatchObject({
+      mistakeCount: 0,
+      submissionCount: 1,
+      errorRate: 0,
+      dominantReason: null,
+    });
+    expect(student.score).toBe(stats.overview.totalScore);
+    expect(
+      stats.knowledgePoints.every(
+        (point) => point.total === point.questionNumbers.length * 2,
+      ),
+    ).toBe(true);
+  });
+
+  it("同一知识点只有一题出错时，分母覆盖该知识点的全部正式题目", () => {
+    const data = fixtureData();
+    const question = data.questions[0];
+    const mistake = data.mistakes.find(
+      (item) =>
+        item.question_id === question.id &&
+        item.submission_id === data.reviewed[0].id,
+    );
+    expect(mistake).toBeTruthy();
+    for (const item of data.questions) {
+      item.knowledge_id = question.knowledge_id;
+      item.knowledge_title = question.knowledge_title;
+    }
+    data.mistakes = [mistake];
+    const stats = buildAssignmentStats(data);
+    expect(stats.knowledgePoints).toHaveLength(1);
+    expect(stats.knowledgePoints[0]).toMatchObject({
+      errorCount: 1,
+      total: data.questions.length * data.reviewed.length,
+    });
+    expect(stats.knowledgePoints[0].correctRate).toBeCloseTo(
+      1 - 1 / (data.questions.length * data.reviewed.length),
+      3,
+    );
+  });
+
+  it("同名不同ID学生的提交分母、错误与个别化题目互不混合", () => {
+    const data = fixtureData();
+    for (const item of data.reviewed) item.student_name = "同名学生";
+    for (const item of data.mistakes) item.student_name = "同名学生";
+    const first = data.reviewed[0];
+    data.mistakes = data.mistakes.filter(
+      (item) => item.submission_id === first.id,
+    );
+    const stats = buildAssignmentStats(data);
+    expect(stats.overview.studentCount).toBe(2);
+    expect(stats.overview.multipleSubmissions).toBe(false);
+    expect(
+      stats.students.every(
+        (item) =>
+          item.submissionCount === 1 &&
+          item.answerSlots === data.questions.length,
+      ),
+    ).toBe(true);
+    const fullMark = stats.students.find(
+      (item) => item.studentId !== first.student_id,
+    );
+    expect(fullMark).toMatchObject({ mistakeCount: 0, dominantReason: null });
+    const detail = buildStudentStats(stats, fullMark.studentId);
+    expect(detail.questions).toEqual([]);
+    expect(detail.knowledgePoints).toEqual([]);
+    expect(detail.reasons.every((item) => item.count === 0)).toBe(true);
+    const payload = promptPayload(stats, { student: fullMark });
+    expect(payload.questions).toEqual([]);
+    expect(payload.knowledgePoints).toEqual([]);
+  });
+
+  it("同名学生同错一题时个别化详情与模型输入仅保留本人的订正素材", () => {
+    const data = fixtureData();
+    const question = data.questions[0];
+    const original = data.mistakes.find(
+      (item) => item.question_id === question.id,
+    );
+    for (const item of data.reviewed) item.student_name = "同名学生";
+    data.mistakes = data.reviewed.map((submission, index) => ({
+      ...original,
+      id: `individual-${index}`,
+      submission_id: submission.id,
+      student_id: submission.student_id,
+      student_name: submission.student_name,
+      reason: `专属${index}错因概念混淆`,
+      correction: `专属${index}订正`,
+      explanation: `专属${index}解释`,
+      practice_json: JSON.stringify([
+        {
+          prompt: `专属${index}练习`,
+          answer: `专属${index}答案`,
+          explanation: `专属${index}练习解释`,
+        },
+      ]),
+    }));
+    const stats = buildAssignmentStats(data);
+    const knowledge = stats.knowledgePoints.find(
+      (point) => point.id === question.knowledge_id,
+    );
+    expect(knowledge.students).toEqual(["同名学生", "同名学生"]);
+    expect(knowledge.studentKeys).toHaveLength(2);
+    const student = stats.students.find(
+      (item) => item.studentId === data.reviewed[1].student_id,
+    );
+    const detail = buildStudentStats(stats, student.studentId);
+    expect(detail.questions).toHaveLength(1);
+    expect(detail.questions[0]).toMatchObject({
+      reasons: ["专属1错因概念混淆"],
+      corrections: ["专属1订正"],
+      explanations: ["专属1解释"],
+      practice: [
+        {
+          prompt: "专属1练习",
+          answer: "专属1答案",
+          explanation: "专属1练习解释",
+        },
+      ],
+    });
+    expect(JSON.stringify(detail)).not.toContain("专属0");
+    const payload = promptPayload(stats, { student });
+    expect(payload.questions[0]).toMatchObject({
+      reason: "专属1错因概念混淆",
+      correction: "专属1订正",
+      explanation: "专属1解释",
+    });
+    expect(JSON.stringify(payload)).not.toContain("专属0");
+  });
+
+  it("同一学生多份复核答卷仍按每份提交保留答题格数", () => {
+    const data = fixtureData();
+    const first = data.reviewed[0];
+    const repeat = { ...first, id: "repeat-submission", score: null };
+    data.reviewed.push(repeat);
+    data.submissions.push(repeat);
+    const stats = buildAssignmentStats(data);
+    const student = stats.students.find(
+      (item) => item.studentId === first.student_id,
+    );
+    expect(student.submissionCount).toBe(2);
+    expect(student.answerSlots).toBe(data.questions.length * 2);
+    expect(stats.overview.multipleSubmissions).toBe(true);
+  });
+
   it("只统计教师已复核的错题", () => {
     const { db, fixture } = createFixtureDatabase();
     const stats = load(db, fixture);
     const expected = fixtureQuestions.reduce(
       (sum, question) =>
-        sum +
-        (question.qing.correct ? 0 : 1) +
-        (question.lin.correct ? 0 : 1),
+        sum + (question.qing.correct ? 0 : 1) + (question.lin.correct ? 0 : 1),
       0,
     );
     expect(stats.overview.mistakeCount).toBe(expected);
@@ -128,7 +319,9 @@ describe("班级学情统计", () => {
       0.875,
       5,
     );
-    expect(stats.reasonDistribution.reduce((sum, item) => sum + item.ratio, 0)).toBeCloseTo(1, 5);
+    expect(
+      stats.reasonDistribution.reduce((sum, item) => sum + item.ratio, 0),
+    ).toBeCloseTo(1, 5);
   });
 
   it("高频错题按出错人数排序并附带讲评素材", () => {
@@ -209,16 +402,13 @@ describe("学生个别化分析", () => {
     expect(detail?.student.name).toBe("林一");
     const numbers = detail.questions.map((question) => question.number);
     expect(numbers).toEqual([...numbers].sort((a, b) => a - b));
-    for (const number of lin.questionNumbers)
-      expect(numbers).toContain(number);
+    for (const number of lin.questionNumbers) expect(numbers).toContain(number);
     // 每一道返回的题都必须确实有该生出错，不能把别的学生的错题算进来
     expect(
       detail.questions.every((question) => question.students.includes("林一")),
     ).toBe(true);
     expect(
-      detail.questions.some(
-        (question) => question.students.length === 1,
-      ),
+      detail.questions.some((question) => question.students.length === 1),
     ).toBe(true);
   });
 

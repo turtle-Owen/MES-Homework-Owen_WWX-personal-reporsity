@@ -55,6 +55,7 @@ beforeAll(async () => {
   db = new DatabaseSync(path.join(dir, "smart-campus.sqlite"));
   db.exec(fs.readFileSync(path.join(root, "server/schema.sql"), "utf8"));
   fixture = seedTeachingFixture(db);
+  db.exec("DROP TABLE submission_files"); // Existing deployments have no attachment table.
   const sample = db
     .prepare("SELECT * FROM users WHERE id=?")
     .get(fixture.teacherId)!;
@@ -114,7 +115,14 @@ beforeAll(async () => {
   const preload = path.join(dir, "mock-model.mjs");
   fs.writeFileSync(
     preload,
-    `globalThis.fetch = async () => { await new Promise(r => setTimeout(r, 500)); return Response.json({choices:[{message:{content:JSON.stringify({ocrText:"RACE_UNREVIEWED",items:[]})}}]}); };`,
+    `import fs from "node:fs";
+    globalThis.fetch = async (_url, options) => {
+      fs.writeFileSync(${JSON.stringify(path.join(dir, "model-request.json"))}, options.body);
+      const configFile=${JSON.stringify(path.join(dir, "model-response.json"))};
+      const config=fs.existsSync(configFile)?JSON.parse(fs.readFileSync(configFile,"utf8")):{delay:500,payload:{ocrText:"RACE_UNREVIEWED",items:[]}};
+      await new Promise(r=>setTimeout(r,config.delay||0));
+      return Response.json({choices:[{message:{content:JSON.stringify(config.payload)}}]});
+    };`,
   );
   child = spawn(process.execPath, ["--import", preload, "server/index.mjs"], {
     cwd: root,
@@ -405,6 +413,375 @@ describe("HTTP authorization regressions (isolated SQLite; no model requests)", 
     ).json();
     expect(visible.teacher_reviewed).toBe(0);
     expect(visible.analysis).toBeNull();
+  });
+  it("migrates legacy storage and keeps legacy submissions readable without creating duplicate files", async () => {
+    expect(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='submission_files'",
+        )
+        .get(),
+    ).toBeTruthy();
+    const response = await request(`/api/submissions/${submissionId}`, teacher);
+    const detail = await response.json();
+    expect(detail.files).toHaveLength(1);
+    expect(detail.questions).toHaveLength(8);
+    expect(
+      db
+        .prepare(
+          "SELECT COUNT(*) n FROM submission_files WHERE submission_id=?",
+        )
+        .get(submissionId)!.n,
+    ).toBe(0);
+  });
+  it("stores ordered pages as one submission and authorizes every attachment", async () => {
+    const admin = db
+      .prepare("SELECT id FROM users WHERE is_school_admin=1")
+      .get()!;
+    db.prepare(
+      "INSERT INTO provider_settings SELECT ?,?,provider,endpoint,model,encrypted_key,iv,updated_at FROM provider_settings WHERE user_id=?",
+    ).run(randomUUID(), admin.id, fixture.teacherId);
+
+    const pages = [
+      Buffer.from([
+        137,
+        80,
+        78,
+        71,
+        13,
+        10,
+        26,
+        10,
+        ...Buffer.from("page-one"),
+      ]),
+      Buffer.from([
+        137,
+        80,
+        78,
+        71,
+        13,
+        10,
+        26,
+        10,
+        ...Buffer.from("page-two"),
+      ]),
+    ];
+    const form = new FormData();
+    pages.forEach((page, i) =>
+      form.append(
+        "files",
+        new Blob([page], { type: "image/png" }),
+        `page-${i}.png`,
+      ),
+    );
+    const before = db.prepare("SELECT COUNT(*) n FROM submissions").get()!
+      .n as number;
+    const uploaded = await fetch(
+      `${base}/api/assignments/${fixture.assignmentId}/submissions`,
+      { method: "POST", headers: { cookie: student }, body: form },
+    );
+    expect(uploaded.status).toBe(200);
+    const rows = await uploaded.json();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].fileCount).toBe(2);
+    expect(db.prepare("SELECT COUNT(*) n FROM submissions").get()!.n).toBe(
+      before + 1,
+    );
+    const id = rows[0].id;
+    const detail = await (
+      await request(`/api/submissions/${id}`, teacher)
+    ).json();
+    expect(detail.files.map((file: any) => file.name)).toEqual([
+      "page-0.png",
+      "page-1.png",
+    ]);
+    for (const file of detail.files) {
+      expect((await request(file.url, student)).status).toBe(200);
+      expect((await request(file.url, peer)).status).toBe(404);
+      expect((await request(file.url, outsider)).status).toBe(404);
+      expect((await request(file.url)).status).toBe(401);
+    }
+    fs.writeFileSync(
+      path.join(dir, "model-response.json"),
+      JSON.stringify({ payload: { ocrText: "both-pages", items: [] } }),
+    );
+    expect(
+      (await request(`/api/submissions/${id}/recognize`, teacher, "POST"))
+        .status,
+    ).toBe(200);
+    const model = JSON.parse(
+      fs.readFileSync(path.join(dir, "model-request.json"), "utf8"),
+    );
+    expect(
+      model.messages[0].content
+        .filter((part: any) => part.type === "image_url")
+        .map((part: any) => part.image_url.url),
+    ).toEqual(
+      pages.map((page) => `data:image/png;base64,${page.toString("base64")}`),
+    );
+    const questions = detail.questions;
+    const reviewItems = questions.map((q: any, i: number) => ({
+      questionId: q.id,
+      isCorrect: i !== 0,
+      score: i === 0 ? 2 : q.score,
+      studentAnswer: "student-value",
+      practiceQuestions:
+        i === 0
+          ? [
+              {
+                prompt: "new-question",
+                answer: "PRIVATE_PRACTICE_REFERENCE",
+                explanation: "PRIVATE_PRACTICE_EXPLANATION",
+              },
+            ]
+          : [],
+    }));
+    expect(
+      (
+        await request(`/api/submissions/${id}/review`, teacher, "POST", {
+          items: reviewItems,
+          score: 999999,
+        })
+      ).status,
+    ).toBe(200);
+    const saved = db
+      .prepare("SELECT score FROM submissions WHERE id=?")
+      .get(id)!;
+    expect(saved.score).toBe(
+      questions.reduce((sum: number, q: any) => sum + q.score, 0) -
+        questions[0].score +
+        2,
+    );
+    for (const invalid of [-1, questions[0].score + 1, "2"]) {
+      expect(
+        (
+          await request(`/api/submissions/${id}/review`, teacher, "POST", {
+            items: reviewItems.map((item: any, i: number) =>
+              i === 0 ? { ...item, score: invalid } : item,
+            ),
+          })
+        ).status,
+      ).toBe(400);
+      expect(
+        db.prepare("SELECT score FROM submissions WHERE id=?").get(id)!.score,
+      ).toBe(saved.score);
+    }
+    const own = await (await request(`/api/submissions/${id}`, student)).json();
+    expect(JSON.stringify(own)).not.toContain("PRIVATE_PRACTICE");
+    const notebook = await (await request("/api/mistakes", student)).json();
+    const mistake = notebook.find((m: any) => m.submission_id === id);
+    expect(mistake.practiceQuestions).toEqual([{ prompt: "new-question" }]);
+    fs.writeFileSync(
+      path.join(dir, "model-response.json"),
+      JSON.stringify({
+        payload: { passed: "false", results: [{ correct: "false" }] },
+      }),
+    );
+    expect(
+      (
+        await request(
+          `/api/mistakes/${mistake.id}/practice/submit`,
+          student,
+          "POST",
+          { answers: ["incorrect"] },
+        )
+      ).status,
+    ).toBe(502);
+    expect(
+      db.prepare("SELECT mastery FROM mistakes WHERE id=?").get(mistake.id)!
+        .mastery,
+    ).toBe(0);
+    expect(
+      (
+        await request(
+          `/api/mistakes/${mistake.id}/practice/submit`,
+          student,
+          "POST",
+          { answers: [] },
+        )
+      ).status,
+    ).toBe(400);
+    fs.writeFileSync(
+      path.join(dir, "model-response.json"),
+      JSON.stringify({
+        payload: {
+          passed: true,
+          results: [{ correct: true, feedback: "ok", answer: "private" }],
+        },
+      }),
+    );
+    const graded = await (
+      await request(
+        `/api/mistakes/${mistake.id}/practice/submit`,
+        student,
+        "POST",
+        { answers: ["correct"] },
+      )
+    ).json();
+    expect(graded).toEqual({
+      passed: true,
+      results: [{ correct: true, feedback: "ok" }],
+    });
+    fs.writeFileSync(
+      path.join(dir, "model-response.json"),
+      JSON.stringify({
+        payload: {
+          questions: [
+            { prompt: "replacement", answer: "HIDDEN", explanation: "HIDDEN" },
+          ],
+        },
+      }),
+    );
+    const generated = await (
+      await request(
+        `/api/mistakes/${mistake.id}/practice/generate`,
+        student,
+        "POST",
+      )
+    ).json();
+    expect(generated).toEqual({ questions: [{ prompt: "replacement" }] });
+    expect(
+      db.prepare("SELECT mastery FROM mistakes WHERE id=?").get(mistake.id)!
+        .mastery,
+    ).toBe(0);
+  });
+  it("does not publish re-recognized mistakes or accept stale practice grades", async () => {
+    const mistake = db
+      .prepare(
+        "SELECT m.* FROM mistakes m JOIN submissions s ON s.id=m.submission_id WHERE m.student_id=? AND s.teacher_reviewed=1 AND m.practice_json IS NOT NULL ORDER BY m.created_at DESC LIMIT 1",
+      )
+      .get(fixture.students[0].id)!;
+    fs.rmSync(path.join(dir, "model-request.json"), { force: true });
+    const questions = JSON.parse(String(mistake.practice_json));
+    fs.writeFileSync(
+      path.join(dir, "model-response.json"),
+      JSON.stringify({
+        delay: 300,
+        payload: {
+          passed: true,
+          results: questions.map(() => ({ correct: true })),
+        },
+      }),
+    );
+    const pending = request(
+      `/api/mistakes/${mistake.id}/practice/submit`,
+      student,
+      "POST",
+      { answers: questions.map(() => "answer") },
+    );
+    for (
+      let i = 0;
+      i < 50 && !fs.existsSync(path.join(dir, "model-request.json"));
+      i++
+    )
+      await new Promise((r) => setTimeout(r, 10));
+    // Change the question set while grading is in flight; the old result must not authorize it.
+    db.prepare("UPDATE mistakes SET practice_json=?,mastery=0 WHERE id=?").run(
+      JSON.stringify([{ prompt: "changed", answer: "new" }]),
+      mistake.id,
+    );
+    expect((await pending).status).toBe(409);
+    expect(
+      db.prepare("SELECT mastery FROM mistakes WHERE id=?").get(mistake.id)!
+        .mastery,
+    ).toBe(0);
+    fs.writeFileSync(
+      path.join(dir, "model-response.json"),
+      JSON.stringify({ payload: { ocrText: "re-recognized", items: [] } }),
+    );
+    expect(
+      (
+        await request(
+          `/api/submissions/${mistake.submission_id}/recognize`,
+          teacher,
+          "POST",
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (await (await request("/api/mistakes", student)).json()).some(
+        (m: any) => m.id === mistake.id,
+      ),
+    ).toBe(false);
+    expect(
+      (
+        await request(
+          `/api/mistakes/${mistake.id}/practice/submit`,
+          student,
+          "POST",
+          { answers: ["x"] },
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await request(
+          `/api/mistakes/${mistake.id}/practice/generate`,
+          student,
+          "POST",
+        )
+      ).status,
+    ).toBe(404);
+    const created = await (
+      await request("/api/assignments", teacher, "POST", {
+        title: "isolated pending source",
+        questions: [
+          { prompt: "dedicated-question", standardAnswer: "a", score: 5 },
+        ],
+      })
+    ).json();
+    const assignment = await (
+      await request(`/api/assignments/${created.id}`, teacher)
+    ).json();
+    const qid = assignment.questions[0].id;
+    const form = new FormData();
+    form.append(
+      "files",
+      new Blob([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])], {
+        type: "image/png",
+      }),
+      "only.png",
+    );
+    const [submission] = await (
+      await fetch(`${base}/api/assignments/${created.id}/submissions`, {
+        method: "POST",
+        headers: { cookie: student },
+        body: form,
+      })
+    ).json();
+    expect(
+      (
+        await request(
+          `/api/submissions/${submission.id}/review`,
+          teacher,
+          "POST",
+          { items: [{ questionId: qid, isCorrect: false, score: 0 }] },
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await request(
+          `/api/submissions/${submission.id}/recognize`,
+          teacher,
+          "POST",
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      db
+        .prepare("SELECT teacher_reviewed FROM submissions WHERE id=?")
+        .get(submission.id)!.teacher_reviewed,
+    ).toBe(0);
+    expect(
+      db
+        .prepare("SELECT COUNT(*) n FROM mistakes WHERE submission_id=?")
+        .get(submission.id)!.n,
+    ).toBe(1);
+    const paper = await (
+      await request("/api/papers/generate", teacher, "POST", { count: 50 })
+    ).json();
+    expect(paper.questions.some((q: any) => q.id === qid)).toBe(false);
   });
   it("handles malformed password values and limits repeated login attempts", async () => {
     expect(
