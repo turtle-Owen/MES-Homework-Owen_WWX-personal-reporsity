@@ -14,6 +14,7 @@
 
 #include "cloudflare.h"
 #include "util.h"
+#include "security.h"
 
 namespace sc {
 
@@ -92,45 +93,60 @@ struct Request {
   std::string method;
   std::string path;
   std::string body;
+  std::string host;
+  std::string origin;
 };
 
 std::string readRequest(SOCKET client, Request &request) {
+  const ULONGLONG deadline = GetTickCount64() + security::requestTimeoutMs;
+  auto receive = [&](char *buffer, int size) {
+    DWORD timeout = security::remainingRequestMs(GetTickCount64(), deadline);
+    if (!timeout) return -1;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout));
+    return recv(client, buffer, size, 0);
+  };
   std::string data;
   char buffer[4096];
-  size_t headerEnd = std::string::npos;
-  for (;;) {
-    int received = recv(client, buffer, sizeof(buffer), 0);
-    if (received <= 0) break;
-    data.append(buffer, received);
-    headerEnd = data.find("\r\n\r\n");
-    if (headerEnd != std::string::npos) break;
-    if (data.size() > 65536) break;
+  size_t headerEnd;
+  while ((headerEnd = data.find("\r\n\r\n")) == std::string::npos) {
+    int n = receive(buffer, sizeof(buffer));
+    if (n <= 0) return "";
+    data.append(buffer, n);
+    if (data.size() > security::maxHeaders && data.find("\r\n\r\n") == std::string::npos) return "";
   }
-  if (headerEnd == std::string::npos) return "";
-  std::string header = data.substr(0, headerEnd);
-  std::istringstream stream(header);
-  std::string line;
+  if (headerEnd > security::maxHeaders) return "";
+  std::istringstream stream(data.substr(0, headerEnd));
+  std::string line, version, extra;
   std::getline(stream, line);
   std::istringstream first(trim(line));
-  first >> request.method >> request.path;
-  size_t contentLength = 0;
+  first >> request.method >> request.path >> version;
+  if (version != "HTTP/1.1" || first >> extra) return "";
+  size_t length = 0;
+  bool seenLength = false, seenHost = false, seenOrigin = false;
   while (std::getline(stream, line)) {
-    std::string text = trim(line);
-    std::string lower = toLower(text);
+    std::string text = trim(line), lower = toLower(text);
     if (startsWith(lower, "content-length:")) {
-      try {
-        contentLength = (size_t)std::stoul(trim(text.substr(15)));
-      } catch (...) {
-      }
-    }
+      if (seenLength || !security::contentLength(trim(text.substr(15)), length)) return "";
+      seenLength = true;
+    } else if (startsWith(lower, "host:")) {
+      if (seenHost) return "";
+      seenHost = true;
+      request.host = trim(text.substr(5));
+    } else if (startsWith(lower, "origin:")) {
+      if (seenOrigin) return "";
+      seenOrigin = true;
+      request.origin = trim(text.substr(7));
+    } else if (startsWith(lower, "transfer-encoding:")) return "";
   }
   std::string body = data.substr(headerEnd + 4);
-  while (body.size() < contentLength) {
-    int received = recv(client, buffer, sizeof(buffer), 0);
-    if (received <= 0) break;
-    body.append(buffer, received);
+  if (body.size() > length) return "";
+  while (body.size() < length) {
+    size_t remaining = length - body.size();
+    int n = receive(buffer, (int)(remaining < sizeof(buffer) ? remaining : sizeof(buffer)));
+    if (n <= 0) return "";
+    body.append(buffer, n);
   }
-  request.body = body.substr(0, contentLength ? contentLength : body.size());
+  request.body = body;
   return request.path;
 }
 
@@ -141,9 +157,16 @@ void sendResponse(SOCKET client, int status, const std::string &contentType,
   head << "content-type: " << contentType << "\r\n";
   head << "content-length: " << body.size() << "\r\n";
   head << "cache-control: no-store\r\n";
+  head << "x-frame-options: DENY\r\n";
+  head << "x-content-type-options: nosniff\r\n";
   head << "connection: close\r\n\r\n";
   std::string response = head.str() + body;
-  send(client, response.c_str(), (int)response.size(), 0);
+  size_t sent = 0;
+  while (sent < response.size()) {
+    int n = send(client, response.data() + sent, (int)(response.size() - sent), 0);
+    if (n <= 0) break;
+    sent += n;
+  }
 }
 
 // ------------------------------ 页面 ------------------------------
@@ -454,7 +477,7 @@ void handleDeploy(SOCKET client, const std::string &body) {
   }
   Json payload;
   std::string parseError;
-  if (!Json::parse(body, payload, &parseError)) {
+  if (!Json::parse(body, payload, &parseError) || !payload.isObject()) {
     g_busy = false;
     sendResponse(client, 400, "application/json; charset=utf-8",
                  "{\"error\":\"请求内容无法解析\"}");
@@ -480,6 +503,8 @@ void handleDeploy(SOCKET client, const std::string &body) {
   }
   if (g_worker.joinable()) g_worker.join();
   g_worker = std::thread([]() {
+    security::BusyReset reset{g_busy};
+    try {
     std::vector<std::string> urls;
     bool ok = g_deployer->deploy(urls);
     std::lock_guard<std::mutex> lock(g_mutex);
@@ -497,6 +522,11 @@ void handleDeploy(SOCKET client, const std::string &body) {
       g_error = "部署未完成，请查看运行日志中的错误信息";
     }
     g_phase = "idle";
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      g_error = "任务执行异常";
+      g_phase = "idle";
+    }
   });
   sendResponse(client, 200, "application/json; charset=utf-8", "{\"ok\":true}");
 }
@@ -514,11 +544,18 @@ void handleInstall(SOCKET client) {
   }
   if (g_worker.joinable()) g_worker.join();
   g_worker = std::thread([]() {
+    security::BusyReset reset{g_busy};
+    try {
     std::vector<Dependency> deps = g_deployer->inspect();
     bool ok = g_deployer->installDependencies(deps);
     std::lock_guard<std::mutex> lock(g_mutex);
     g_phase = "idle";
     if (!ok) g_error = "部分依赖安装失败，请查看日志";
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(g_mutex);
+      g_error = "依赖安装异常";
+      g_phase = "idle";
+    }
   });
   sendResponse(client, 200, "application/json; charset=utf-8", "{\"ok\":true}");
 }
@@ -542,7 +579,7 @@ void handleStatus(SOCKET client, bool refreshDeps) {
       << "\",\"percent\":" << percent << ",\"total\":" << total << ",\"steps\":" << steps
       << ",\"logs\":" << logs << ",\"urls\":" << (result.empty() ? "[]" : result)
       << ",\"error\":\"" << jsonEscape(error) << "\"";
-  if (refreshDeps) {
+  if (refreshDeps && !g_busy) {
     std::vector<Dependency> deps = g_deployer->inspect();
     out << ",\"deps\":[";
     for (size_t i = 0; i < deps.size(); ++i) {
@@ -562,6 +599,11 @@ void handleStatus(SOCKET client, bool refreshDeps) {
 }  // namespace
 
 int runWebConsole(Deployer &deployer, int port, bool openBrowser) {
+  if (port < 1 || port > 65535 || !security::shellPath(currentDir()) ||
+      !security::shellPath(envVar("TEMP")) || !security::shellPath(envVar("USERPROFILE"))) {
+    logError("控制台端口或运行目录格式不受支持");
+    return 1;
+  }
   g_deployer = &deployer;
   // 日志级别已由 util 层统一为 info/step/ok/warn/error/detail，直接透传
   deployer.setLogSink([](const std::string &level, const std::string &message) {
@@ -611,9 +653,16 @@ int runWebConsole(Deployer &deployer, int port, bool openBrowser) {
     if (ready <= 0) continue;
     SOCKET client = accept(server, nullptr, nullptr);
     if (client == INVALID_SOCKET) continue;
+    DWORD sendTimeout = security::requestTimeoutMs;
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (const char *)&sendTimeout, sizeof(sendTimeout));
     Request request;
     std::string path = readRequest(client, request);
     if (path.empty()) {
+      closesocket(client);
+      continue;
+    }
+    if (!security::browserRequest(request.host, request.origin, request.method, port)) {
+      sendResponse(client, 403, "application/json", "{\"error\":\"untrusted origin\"}");
       closesocket(client);
       continue;
     }
@@ -628,6 +677,12 @@ int runWebConsole(Deployer &deployer, int port, bool openBrowser) {
     } else if (route == "/api/install" && request.method == "POST") {
       handleInstall(client);
     } else if (route == "/api/stop" && request.method == "POST") {
+      if (!security::mayStop(g_busy)) {
+        sendResponse(client, 409, "application/json", "{\"error\":\"task running\"}");
+        closesocket(client);
+        continue;
+      }
+      if (g_worker.joinable()) g_worker.join();
       logStep("正在停止服务与隧道…");
       deployer.stop();
       {

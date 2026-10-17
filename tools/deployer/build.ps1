@@ -43,7 +43,7 @@ if ($cmake) {
     -static -static-libgcc -static-libstdc++ `
     -o (Join-Path $outDir "campus-deploy.exe") `
     @sources `
-    -lws2_32 -liphlpapi -lshell32 -ladvapi32 -lole32
+    -lws2_32 -liphlpapi -lshell32 -lbcrypt -ladvapi32 -lole32
   if ($LASTEXITCODE -ne 0) { throw "编译失败" }
 } else {
   throw "未找到 cmake 或 g++。请安装 MinGW-w64（含 g++）或 Visual Studio 生成工具。"

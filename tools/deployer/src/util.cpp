@@ -4,6 +4,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <bcrypt.h>
 
 #include <shlobj.h>  // SHCreateDirectoryExW
 
@@ -17,6 +18,8 @@
 #include <map>
 #include <random>
 #include <sstream>
+#include <stdexcept>
+#include "security.h"
 
 namespace sc {
 
@@ -211,12 +214,13 @@ std::string jsonEscape(const std::string &text) {
 }
 
 std::string randomHex(int bytes) {
-  std::random_device device;
-  std::mt19937_64 engine(((uint64_t)device() << 32) ^ device() ^ (uint64_t)GetTickCount64());
+  std::vector<unsigned char> random((size_t)bytes);
+  if (BCryptGenRandom(nullptr, random.data(), (ULONG)random.size(), BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+    throw std::runtime_error("Windows secure random generator failed");
   static const char *hex = "0123456789abcdef";
   std::string out;
   for (int i = 0; i < bytes; ++i) {
-    unsigned value = (unsigned)(engine() & 0xFF);
+    unsigned value = random[(size_t)i];
     out.push_back(hex[value >> 4]);
     out.push_back(hex[value & 0x0F]);
   }
@@ -515,15 +519,30 @@ HttpResponse httpRequest(const std::string &url, const std::string &method,
   std::string configPath = tempPath("sc-deploy-curl-" + randomHex(6) + ".cfg");
   std::string bodyPath;
   std::ostringstream config;
+  if (url.find_first_of("\r\n\"\\") != std::string::npos ||
+      method.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::string::npos ||
+      !security::shellPath(configPath)) {
+    response.error = "Invalid HTTP request configuration";
+    return response;
+  }
   config << "url = \"" << url << "\"\n";
   config << "request = \"" << method << "\"\n";
   config << "silent\nshow-error\nlocation\nmax-time = 120\n";
   config << "write-out = \"\\n%{http_code}\"\n";
-  for (const std::string &header : headers) config << "header = \"" << header << "\"\n";
+  for (const std::string &header : headers) {
+    if (header.find_first_of("\r\n\"\\") != std::string::npos) {
+      response.error = "Invalid HTTP header";
+      return response;
+    }
+    config << "header = \"" << header << "\"\n";
+  }
   if (!body.empty()) {
     bodyPath = tempPath("sc-deploy-body-" + randomHex(6) + ".tmp");
-    writeFileUtf8(bodyPath, body);
-    config << "data-binary = \"@" << bodyPath << "\"\n";
+    if (!writeFileUtf8(bodyPath, body)) {
+      response.error = "Unable to write HTTP request body";
+      return response;
+    }
+    config << "data-binary = \"@" << replaceAll(bodyPath, "\\", "/") << "\"\n";
   }
   if (!writeFileUtf8(configPath, config.str())) {
     response.error = "无法写入 curl 配置";
