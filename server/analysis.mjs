@@ -30,7 +30,15 @@ export const reasonTypes = [
     short: "空题、漏题",
     color: "#5b7fb8",
     hint: "空题不等于不会，先分清是时间不够、漏看题号还是真的不会。",
-    keywords: ["未作答", "未填写", "未提供", "空白", "没有作答", "漏做", "未答"],
+    keywords: [
+      "未作答",
+      "未填写",
+      "未提供",
+      "空白",
+      "没有作答",
+      "漏做",
+      "未答",
+    ],
   },
   {
     id: "careless",
@@ -236,7 +244,8 @@ const classifyOrder = [
   "guess",
 ];
 
-const blankAnswerPattern = /^(未作答|未填写|未提供|未答|空白|无|没有作答|没写|—|-|\/|n\/a)$/i;
+const blankAnswerPattern =
+  /^(未作答|未填写|未提供|未答|空白|无|没有作答|没写|—|-|\/|n\/a)$/i;
 
 export function isBlankAnswer(answer) {
   const text = String(answer || "").trim();
@@ -279,7 +288,9 @@ function partitionByQuestion(rows) {
   for (const row of rows) {
     const entry = byQuestion.get(row.number) || { total: 0, ranked: [] };
     entry.total += 1;
-    const existing = entry.ranked.find((candidate) => candidate.id === row.type.id);
+    const existing = entry.ranked.find(
+      (candidate) => candidate.id === row.type.id,
+    );
     if (existing) existing.count += 1;
     else entry.ranked.push({ id: row.type.id, count: 1 });
     byQuestion.set(row.number, entry);
@@ -379,15 +390,16 @@ function partitionReasonItems(rows) {
  */
 export function mergeReasonTypes(items, aiReasonTypes) {
   if (!Array.isArray(aiReasonTypes) || !aiReasonTypes.length) return items;
-  const denominator =
-    items.reduce((sum, item) => sum + item.count, 0) || 1;
+  const denominator = items.reduce((sum, item) => sum + item.count, 0) || 1;
   // 依据现有分布还原“每道题的错题数与原始归因”
   const byQuestion = new Map();
   for (const item of items) {
     for (const question of item.questions || []) {
       const entry = byQuestion.get(question.number) || { total: 0, ranked: [] };
       entry.total += question.count;
-      const existing = entry.ranked.find((candidate) => candidate.id === item.id);
+      const existing = entry.ranked.find(
+        (candidate) => candidate.id === item.id,
+      );
       if (existing) existing.count += question.count;
       else entry.ranked.push({ id: item.id, count: question.count });
       byQuestion.set(question.number, entry);
@@ -484,9 +496,7 @@ function questionKey(row) {
  * 调用方必须传入 teacherId 或 schoolId，保证数据按身份隔离。
  */
 export function loadAssignmentData(db, { teacherId, schoolId, assignmentId }) {
-  const scoped = teacherId
-    ? "a.teacher_id=?"
-    : "a.school_id=?";
+  const scoped = teacherId ? "a.teacher_id=?" : "a.school_id=?";
   const assignment = db
     .prepare(
       `SELECT a.*,u.name teacher_name FROM assignments a LEFT JOIN users u ON u.id=a.teacher_id WHERE a.id=? AND ${scoped}`,
@@ -518,7 +528,27 @@ export function loadAssignmentData(db, { teacherId, schoolId, assignmentId }) {
   return { assignment, questions, submissions, reviewed, mistakes };
 }
 
-export function buildAssignmentStats({ assignment, questions, submissions, reviewed, mistakes }) {
+function studentKey(item) {
+  return (
+    item.student_id ||
+    item.studentId ||
+    `name:${item.student_name ?? item.name}`
+  );
+}
+
+function includesStudent(entry, student) {
+  return entry.studentKeys
+    ? entry.studentKeys.includes(studentKey(student))
+    : !student.studentId && entry.students.includes(student.name);
+}
+
+export function buildAssignmentStats({
+  assignment,
+  questions,
+  submissions,
+  reviewed,
+  mistakes,
+}) {
   const reviewedIds = new Set(reviewed.map((item) => item.id));
   // 只有教师确认过的错题才进入统计口径；未复核的行留作“待复核”计数。
   const reviewedMistakes = mistakes.filter(
@@ -556,8 +586,39 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
   const reasonRows = [];
   const questionMap = new Map();
   const studentMap = new Map();
+  const submissionById = new Map(reviewed.map((item) => [item.id, item]));
+  for (const question of questions) {
+    const key = question.knowledge_id || "pending";
+    const entry = knowledgeMap.get(key) || {
+      id: key,
+      title: question.knowledge_title || "待补充知识点",
+      questionNumbers: [],
+      errorCount: 0,
+      students: new Set(),
+      studentKeys: new Set(),
+    };
+    if (!entry.questionNumbers.includes(question.number))
+      entry.questionNumbers.push(question.number);
+    knowledgeMap.set(key, entry);
+  }
+  for (const submission of reviewed) {
+    const key = studentKey(submission);
+    if (!studentMap.has(key))
+      studentMap.set(key, {
+        studentId: submission.student_id || "",
+        name: submission.student_name || "未命名学生",
+        mistakeCount: 0,
+        questionNumbers: [],
+        knowledgeIds: [],
+        reasons: [],
+        missingWork: 0,
+      });
+  }
 
   for (const row of reviewedMistakes) {
+    // Submission ownership is authoritative, including for historical mistake rows.
+    const owner = submissionById.get(row.submission_id);
+    const ownerKey = studentKey(owner);
     const knowledgeKey = row.knowledge_id || "pending";
     const type = classifyReason(row.reason, {
       studentAnswer: row.student_answer,
@@ -568,7 +629,8 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
       type,
       reason: row.reason,
       prompt: row.prompt,
-      studentName: row.student_name,
+      studentName: owner.student_name,
+      studentKey: ownerKey,
     });
     const knowledgeEntry = knowledgeMap.get(knowledgeKey) || {
       id: knowledgeKey,
@@ -576,11 +638,13 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
       questionNumbers: [],
       errorCount: 0,
       students: new Set(),
+      studentKeys: new Set(),
     };
     if (!knowledgeEntry.questionNumbers.includes(row.number))
       knowledgeEntry.questionNumbers.push(row.number);
     knowledgeEntry.errorCount += 1;
-    if (row.student_name) knowledgeEntry.students.add(row.student_name);
+    if (owner.student_name) knowledgeEntry.students.add(owner.student_name);
+    knowledgeEntry.studentKeys.add(ownerKey);
     knowledgeMap.set(knowledgeKey, knowledgeEntry);
 
     const qKey = questionKey(row);
@@ -594,12 +658,16 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
       score: number(row.question_score),
       wrongCount: 0,
       students: [],
+      studentKeys: [],
+      studentDetails: [],
       reasons: [],
       corrections: [],
       explanations: [],
       practice: [],
     };
     questionEntry.wrongCount += 1;
+    if (!questionEntry.studentKeys.includes(ownerKey))
+      questionEntry.studentKeys.push(ownerKey);
     if (row.student_name) {
       questionEntry.studentCounts = questionEntry.studentCounts || {};
       questionEntry.studentCounts[row.student_name] =
@@ -613,6 +681,21 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
     if (row.explanation)
       questionEntry.explanations.push(truncate(row.explanation, 400));
     const practice = row.practice_json ? safeParse(row.practice_json, []) : [];
+    questionEntry.studentDetails.push({
+      studentKey: ownerKey,
+      reason: row.reason ? truncate(row.reason, 200) : "",
+      correction: row.correction ? truncate(row.correction, 200) : "",
+      explanation: row.explanation ? truncate(row.explanation, 400) : "",
+      reasonTypeId: type.id,
+      practice: (Array.isArray(practice) ? practice : [])
+        .filter((item) => item?.prompt)
+        .slice(0, 2)
+        .map((item) => ({
+          prompt: String(item.prompt),
+          answer: String(item.answer || ""),
+          explanation: String(item.explanation || ""),
+        })),
+    });
     for (const item of Array.isArray(practice) ? practice : []) {
       if (item?.prompt && questionEntry.practice.length < 2)
         questionEntry.practice.push({
@@ -623,26 +706,15 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
     }
     questionMap.set(qKey, questionEntry);
 
-    if (row.student_name) {
-      const studentKey = row.student_id || `name:${row.student_name}`;
-      const studentEntry = studentMap.get(studentKey) || {
-        studentId: row.student_id || "",
-        name: row.student_name,
-        mistakeCount: 0,
-        questionNumbers: [],
-        knowledgeIds: [],
-        reasons: [],
-        missingWork: 0,
-      };
-      studentEntry.mistakeCount += 1;
-      if (!studentEntry.questionNumbers.includes(row.number))
-        studentEntry.questionNumbers.push(row.number);
-      if (!studentEntry.knowledgeIds.includes(knowledgeKey))
-        studentEntry.knowledgeIds.push(knowledgeKey);
-      if (studentEntry.reasons.length < 6) studentEntry.reasons.push(type.id);
-      if (type.id === "blank") studentEntry.missingWork += 1;
-      studentMap.set(studentKey, studentEntry);
-    }
+    const studentEntry = studentMap.get(ownerKey);
+    studentEntry.mistakeCount += 1;
+    if (!studentEntry.questionNumbers.includes(row.number))
+      studentEntry.questionNumbers.push(row.number);
+    if (!studentEntry.knowledgeIds.includes(knowledgeKey))
+      studentEntry.knowledgeIds.push(knowledgeKey);
+    // Keep every reason: truncation would bias the dominant reason for long assignments.
+    studentEntry.reasons.push(type.id);
+    if (type.id === "blank") studentEntry.missingWork += 1;
   }
 
   const knowledgePoints = [...knowledgeMap.values()]
@@ -653,12 +725,15 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
         title: entry.title,
         questionNumbers: entry.questionNumbers.sort((a, b) => a - b),
         errorCount: entry.errorCount,
-        students: [...entry.students],
+        students: [...entry.studentKeys].map((key) => studentMap.get(key).name),
+        studentKeys: [...entry.studentKeys],
         total,
         correctRate: total > 0 ? rate(total - entry.errorCount, total) : 1,
       };
     })
-    .sort((a, b) => a.correctRate - b.correctRate || b.errorCount - a.errorCount);
+    .sort(
+      (a, b) => a.correctRate - b.correctRate || b.errorCount - a.errorCount,
+    );
 
   const unreadableCount = reasonRows.filter(
     (row) => row.type.id === "unreadable",
@@ -677,16 +752,12 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
       corrections: [...new Set(entry.corrections)].slice(0, 2),
       explanations: [...new Set(entry.explanations)].slice(0, 2),
     }))
-    .sort(
-      (a, b) => b.wrongCount - a.wrongCount || a.number - b.number,
-    );
+    .sort((a, b) => b.wrongCount - a.wrongCount || a.number - b.number);
 
   const students = [...studentMap.values()]
     .map((entry) => {
       const ownSubmissions = reviewed.filter(
-        (item) =>
-          (entry.studentId && item.student_id === entry.studentId) ||
-          item.student_name === entry.name,
+        (item) => studentKey(item) === studentKey(entry),
       ).length;
       const answerSlots = ownSubmissions * questions.length;
       return {
@@ -703,11 +774,9 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
         ),
         score:
           [...earnedByStudent.values()].find(
-            (item) => item.studentId && item.studentId === entry.studentId,
+            (item) => studentKey(item) === studentKey(entry),
           )?.earned ?? null,
-        dominantReason:
-          dominantReasonFromRows(reasonRows, entry.name) ||
-          dominantReason(entry.reasons),
+        dominantReason: dominantReason(entry.reasons),
       };
     })
     .sort(
@@ -735,7 +804,10 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
       totalScore,
       mistakeCount: reviewedMistakes.length,
       answerSlots: submissionCount * questions.length,
-      errorRate: rate(reviewedMistakes.length, submissionCount * questions.length),
+      errorRate: rate(
+        reviewedMistakes.length,
+        submissionCount * questions.length,
+      ),
       scoreRate: rate(
         earnedList.reduce((sum, item) => sum + item.earned, 0),
         scoreDenominator,
@@ -752,10 +824,7 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
       unreadableCount,
       usefulMistakeCount: reviewedMistakes.length - unreadableCount,
       pendingMistakeCount: pendingMistakes,
-      multipleSubmissions: students.some(
-        (entry) =>
-          reviewed.filter((item) => item.student_name === entry.name).length > 1,
-      ),
+      multipleSubmissions: students.some((entry) => entry.submissionCount > 1),
     },
     knowledgePoints,
     reasonDistribution,
@@ -765,6 +834,7 @@ export function buildAssignmentStats({ assignment, questions, submissions, revie
     reasonRows: reasonRows.map((row) => ({
       number: row.number,
       studentName: row.studentName,
+      studentKey: row.studentKey,
       type: { id: row.type.id },
     })),
     resources: buildResources(highFrequencyQuestions),
@@ -775,17 +845,6 @@ function dominantReason(reasonIds) {
   if (!reasonIds.length) return null;
   const counts = new Map();
   for (const id of reasonIds) counts.set(id, (counts.get(id) || 0) + 1);
-  const [id] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
-  const type = reasonType(id);
-  return { id, label: type.label, color: type.color };
-}
-
-function dominantReasonFromRows(reasonRows, studentName) {
-  const own = reasonRows.filter((row) => row.studentName === studentName);
-  if (!own.length) return null;
-  const counts = new Map();
-  for (const row of own)
-    counts.set(row.type.id, (counts.get(row.type.id) || 0) + 1);
   const [id] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
   const type = reasonType(id);
   return { id, label: type.label, color: type.color };
@@ -819,8 +878,37 @@ function buildResources(highFrequencyQuestions) {
     knowledgePoints: knowledge.filter(
       (item) => item.explanations.length || item.practice.length,
     ),
-    totalPractice: knowledge.reduce((sum, item) => sum + item.practice.length, 0),
+    totalPractice: knowledge.reduce(
+      (sum, item) => sum + item.practice.length,
+      0,
+    ),
   };
+}
+
+function individualQuestions(stats, student) {
+  return stats.highFrequencyQuestions
+    .filter((question) => includesStudent(question, student))
+    .map((question) => {
+      const { studentDetails, ...shared } = question;
+      const own = (studentDetails || []).filter(
+        (detail) => detail.studentKey === studentKey(student),
+      );
+      return {
+        ...shared,
+        reasons: [
+          ...new Set(own.map((detail) => detail.reason).filter(Boolean)),
+        ].slice(0, 3),
+        corrections: [
+          ...new Set(own.map((detail) => detail.correction).filter(Boolean)),
+        ].slice(0, 2),
+        explanations: [
+          ...new Set(own.map((detail) => detail.explanation).filter(Boolean)),
+        ].slice(0, 2),
+        practice: own.flatMap((detail) => detail.practice).slice(0, 2),
+        reasonTypeId: own[0]?.reasonTypeId || "",
+      };
+    })
+    .sort((a, b) => a.number - b.number);
 }
 
 /**
@@ -829,17 +917,17 @@ function buildResources(highFrequencyQuestions) {
  */
 export function buildStudentStats(stats, studentId) {
   const student = stats.students.find(
-    (item) => item.studentId === studentId || item.name === studentId,
+    (item) =>
+      item.studentId === studentId ||
+      (!item.studentId && item.name === studentId),
   );
   if (!student) return null;
-  const questions = stats.highFrequencyQuestions
-    .filter((question) => question.students.includes(student.name))
-    .sort((a, b) => a.number - b.number);
+  const questions = individualQuestions(stats, student);
   const knowledgePoints = stats.knowledgePoints.filter((point) =>
-    point.students.includes(student.name),
+    includesStudent(point, student),
   );
   const ownRows = (stats.reasonRows || []).filter(
-    (row) => row.studentName === student.name,
+    (row) => row.studentKey === studentKey(student),
   );
   const reasons = partitionReasonItems(
     ownRows.map((row) => ({
@@ -869,7 +957,10 @@ export function safeParse(value, fallback) {
 /**
  * 把统计结论压缩成给模型的输入，避免把整张错题表塞进提示词。
  */
-export function promptPayload(stats, { student = null, knowledgeLabels = [] } = {}) {
+export function promptPayload(
+  stats,
+  { student = null, knowledgeLabels = [] } = {},
+) {
   const scope = student
     ? {
         scope: "individual",
@@ -884,19 +975,17 @@ export function promptPayload(stats, { student = null, knowledgeLabels = [] } = 
           blankCount: student.missingWork,
           dominantReason: student.dominantReason?.label || "待判定",
         },
-        questions: stats.highFrequencyQuestions
-          .filter((question) => question.students.includes(student.name))
-          .map((question) => ({
-            number: question.number,
-            prompt: truncate(question.prompt, 220),
-            knowledge: question.knowledgeTitle,
-            studentsAnswerWrong: question.wrongCount,
-            reason: question.reasons[0] || "",
-            correction: question.corrections[0] || "",
-            explanation: question.explanations[0] || "",
-          })),
+        questions: individualQuestions(stats, student).map((question) => ({
+          number: question.number,
+          prompt: truncate(question.prompt, 220),
+          knowledge: question.knowledgeTitle,
+          studentsAnswerWrong: question.wrongCount,
+          reason: question.reasons[0] || "",
+          correction: question.corrections[0] || "",
+          explanation: question.explanations[0] || "",
+        })),
         knowledgePoints: stats.knowledgePoints
-          .filter((point) => point.students.includes(student.name))
+          .filter((point) => includesStudent(point, student))
           .map((point) => ({
             title: point.title,
             questionNumbers: point.questionNumbers,

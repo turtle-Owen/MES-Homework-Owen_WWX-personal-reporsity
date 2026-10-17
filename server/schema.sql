@@ -16,3 +16,6 @@ CREATE INDEX IF NOT EXISTS idx_mistakes_submission ON mistakes(submission_id);
 CREATE INDEX IF NOT EXISTS idx_questions_assignment ON questions(assignment_id);
 CREATE INDEX IF NOT EXISTS idx_submissions_assignment ON submissions(assignment_id);
 CREATE INDEX IF NOT EXISTS idx_analyses_assignment ON teaching_analyses(assignment_id,scope);
+
+CREATE TABLE IF NOT EXISTS submission_files(id TEXT PRIMARY KEY,submission_id TEXT NOT NULL,position INTEGER NOT NULL,file_path TEXT NOT NULL UNIQUE,file_type TEXT NOT NULL,original_name TEXT NOT NULL,FOREIGN KEY(submission_id) REFERENCES submissions(id) ON DELETE CASCADE,UNIQUE(submission_id,position));
+CREATE INDEX IF NOT EXISTS idx_submission_files_submission ON submission_files(submission_id,position);

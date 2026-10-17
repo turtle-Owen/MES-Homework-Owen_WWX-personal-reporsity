@@ -87,6 +87,12 @@ Environment variables must be passed to the process; start with `node --env-file
 7. Confirmed mistakes enter the corresponding student accounts and the mistake-based exam paper pool.
 8. In "AI Teaching Analysis," select this assignment to generate review plans, error cause statistics, and student follow-up lists.
 
+## Submission and grading fixes (2026-10-17)
+
+Files selected in one upload now form a single student's answer sheet and are recognized in selection order. Do not mix different students in one upload. Startup adds the `submission_files` table automatically; legacy single-file submissions remain readable. Previously split submissions cannot be reliably regrouped and are left unchanged; re-upload complete answer sheets and review historical statistics where needed.
+
+Review uses canonical question numbers, prompts, maximum points and editable scores; verdicts and scores stay consistent, and totals are calculated on the server. Switching students cannot mix recognition results, and malformed model output can be retried. Student practice APIs omit reference answers and require strict JSON boolean grades. Re-recognized mistakes are excluded from notebooks, practice and paper generation until approved again. Analytics retain perfect-score students and error-free knowledge points and isolate same-name accounts by ID.
+
 ## Testing & Verification
 
 ```powershell
