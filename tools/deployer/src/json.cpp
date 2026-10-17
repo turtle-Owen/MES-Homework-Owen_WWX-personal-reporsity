@@ -58,6 +58,7 @@ class JsonParser {
   const std::string &text_;
   std::string *error_;
   size_t position_ = 0;
+  size_t depth_ = 0;
 
   bool fail(const std::string &message) {
     if (error_) {
@@ -82,6 +83,10 @@ class JsonParser {
   }
 
   bool parseValue(Json &out) {
+    if (depth_ >= 64) return fail("JSON nesting limit exceeded");
+    struct DepthGuard { size_t &depth; ~DepthGuard() { --depth; } };
+    ++depth_;
+    DepthGuard guard{depth_};
     if (position_ >= text_.size()) return fail("意外结束");
     char ch = text_[position_];
     switch (ch) {

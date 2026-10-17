@@ -22,6 +22,7 @@ export async function extractWordDocument(filePath, mimeType, fileName = "") {
     const html = await mammoth.convertToHtml(
       { path: filePath },
       {
+        externalFileAccess: false,
         convertImage: mammoth.images.imgElement(async (image) => {
           const buffer = await image.read();
           if (image.contentType?.startsWith("image/")) {

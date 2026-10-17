@@ -19,7 +19,7 @@ add_executable(campus-deploy
 )
 
 # Windows 平台依赖：Winsock、IP 助手、Shell、注册表（注册表在 advapi32 中）
-target_link_libraries(campus-deploy PRIVATE ws2_32 iphlpapi shell32 advapi32 ole32)
+target_link_libraries(campus-deploy PRIVATE ws2_32 iphlpapi shell32 bcrypt advapi32 ole32)
 
 if(MSVC)
   target_compile_options(campus-deploy PRIVATE /utf-8 /W3)
@@ -41,7 +41,7 @@ add_executable(json-test EXCLUDE_FROM_ALL
   src/json.cpp
   src/util.cpp
 )
-target_link_libraries(json-test PRIVATE ws2_32 iphlpapi shell32 advapi32)
+target_link_libraries(json-test PRIVATE ws2_32 iphlpapi shell32 bcrypt advapi32)
 if(MSVC)
   target_compile_options(json-test PRIVATE /utf-8 /W3)
 else()

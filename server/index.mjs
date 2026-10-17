@@ -26,6 +26,23 @@ import {
   safeParse,
 } from "./analysis.mjs";
 import readXlsxFile from "read-excel-file/node";
+import {
+  providerEndpoint,
+  sameOriginWrites,
+  authRateLimit,
+  validPassword,
+  validateUploads,
+} from "./security.mjs";
+
+const configuredSecret = process.env.APP_SECRET;
+if (
+  process.env.NODE_ENV === "production" &&
+  (!configuredSecret ||
+    configuredSecret.length < 32 ||
+    configuredSecret.includes("请替换"))
+) {
+  throw new Error("生产环境必须配置至少 32 位随机 APP_SECRET");
+}
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const data = path.resolve(process.env.DATA_DIR || path.join(root, "data"));
@@ -68,11 +85,31 @@ if (!mistakeColumns.some((column) => column.name === "practice_json"))
 if (!mistakeColumns.some((column) => column.name === "mastery"))
   db.exec("ALTER TABLE mistakes ADD COLUMN mastery INTEGER NOT NULL DEFAULT 0");
 const app = express();
+app.disable("x-powered-by");
+app.use(sameOriginWrites);
 app.use(express.json({ limit: "2mb" }));
-app.use("/uploads", express.static(files));
+app.use(
+  ["/api/auth/login", "/api/auth/register", "/api/schools/register"],
+  authRateLimit(),
+);
+app.use("/api", (req, res, next) => {
+  if (
+    !req.body &&
+    !req.get("content-type") &&
+    !Number(req.get("content-length"))
+  )
+    req.body = {};
+  if (
+    ["POST", "PUT", "PATCH"].includes(req.method) &&
+    !req.is("multipart/form-data") &&
+    (!req.body || Array.isArray(req.body) || typeof req.body !== "object")
+  )
+    return res.status(400).json({ error: "请求须为 JSON 对象" });
+  next();
+});
 const upload = multer({
   dest: files,
-  limits: { fileSize: 20 * 1024 * 1024, files: 10 },
+  limits: { fileSize: 20 * 1024 * 1024, files: 10, fields: 20, parts: 30 },
   fileFilter: (_r, f, cb) =>
     cb(
       null,
@@ -83,12 +120,12 @@ const upload = multer({
         "application/pdf",
         "application/msword",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-      ].includes(f.mimetype) || /\.docx?$/i.test(f.originalname),
+      ].includes(f.mimetype),
     ),
 });
 const memoryUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024, files: 1 },
+  limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 20, parts: 21 },
 });
 const uid = () => randomUUID(),
   iso = () => new Date().toISOString();
@@ -193,7 +230,13 @@ async function askModel(userId, prompt, images = []) {
       },
     });
   });
-  const rr = await fetch(config.endpoint, {
+  const preset =
+    Object.hasOwn(providers, config.provider) && providers[config.provider];
+  if (!preset) throw new Error("模型厂商无效");
+  const endpoint = providerEndpoint(config.endpoint, preset);
+  const rr = await fetch(endpoint, {
+    redirect: "error",
+    signal: AbortSignal.timeout(60000),
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -206,10 +249,7 @@ async function askModel(userId, prompt, images = []) {
       messages: [{ role: "user", content: images.length ? content : prompt }],
     }),
   });
-  if (!rr.ok)
-    throw new Error(
-      `模型接口 ${rr.status}: ${(await rr.text()).slice(0, 500)}`,
-    );
+  if (!rr.ok) throw new Error(`模型接口请求失败 (${rr.status})`);
   const raw = await rr.json();
   const text = raw.choices?.[0]?.message?.content;
   if (!text) throw new Error("模型没有返回识别内容");
@@ -217,12 +257,7 @@ async function askModel(userId, prompt, images = []) {
 }
 
 function makeSchoolAndTeacher(x) {
-  if (
-    !x.schoolName ||
-    !x.name ||
-    !x.email ||
-    String(x.password || "").length < 8
-  ) {
+  if (!x.schoolName || !x.name || !x.email || !validPassword(x.password)) {
     throw new Error("请完整填写学校与管理员信息，密码至少 8 位");
   }
   const school = { id: uid(), name: String(x.schoolName).trim() };
@@ -314,19 +349,19 @@ app.post("/api/schools/register", (req, res) => {
 app.post("/api/auth/register", (req, res) => {
   try {
     const x = req.body;
+    if (x.role !== "student")
+      return res.status(403).json({ error: "教师账户须由学校管理员创建" });
     if (
       !["teacher", "student"].includes(x.role) ||
       !x.name ||
       !x.email ||
-      String(x.password || "").length < 8
+      !validPassword(x.password)
     )
       return res.status(400).json({ error: "请完整填写信息，密码至少 8 位" });
     if (
-      x.role === "teacher" &&
-      (!x.schoolCode ||
-        !["小学", "初中", "高中"].includes(x.stage) ||
-        !x.subject ||
-        !x.className)
+      !x.schoolCode ||
+      !["小学", "初中", "高中"].includes(x.stage) ||
+      !x.className
     )
       return res
         .status(400)
@@ -361,6 +396,11 @@ app.post("/api/auth/register", (req, res) => {
   }
 });
 app.post("/api/auth/login", (req, res) => {
+  if (
+    typeof req.body.password !== "string" ||
+    Buffer.byteLength(req.body.password) > 1024
+  )
+    return res.status(400).json({ error: "密码格式无效" });
   const u = db
     .prepare("SELECT * FROM users WHERE email=?")
     .get(String(req.body.email || "").toLowerCase());
@@ -383,6 +423,13 @@ app.get("/api/me", auth, (req, res) => {
 });
 app.patch("/api/me", auth, (req, res) => {
   const x = req.body;
+  if (
+    req.user.role === "student" &&
+    (x.stage !== undefined ||
+      x.className !== undefined ||
+      x.subject !== undefined)
+  )
+    return res.status(403).json({ error: "学生不能自行更改学段或班级" });
   if (x.stage && !["小学", "初中", "高中"].includes(x.stage))
     return res.status(400).json({ error: "学段无效" });
   db.prepare(
@@ -406,11 +453,19 @@ app.get("/api/settings/provider", auth, schoolStaff, (req, res) =>
   ),
 );
 app.put("/api/settings/provider", auth, schoolStaff, (req, res) => {
-  const p = providers[req.body.provider];
+  const p =
+    Object.hasOwn(providers, req.body.provider) && providers[req.body.provider];
   if (!p || !req.body.apiKey)
     return res.status(400).json({ error: "请选择厂商并填写 API Key" });
+  let endpoint;
+  try {
+    endpoint = providerEndpoint(req.body.endpoint || p.endpoint, p);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  if (typeof req.body.apiKey !== "string" || req.body.apiKey.length > 8192)
+    return res.status(400).json({ error: "API Key 格式无效" });
   const [key, iv] = encrypt(req.body.apiKey);
-  const endpoint = req.body.endpoint || p.endpoint;
   const model = req.body.model || p.model;
   db.prepare(
     "INSERT INTO provider_settings(id,user_id,provider,endpoint,model,encrypted_key,iv,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET provider=excluded.provider,endpoint=excluded.endpoint,model=excluded.model,encrypted_key=excluded.encrypted_key,iv=excluded.iv,updated_at=excluded.updated_at",
@@ -460,7 +515,7 @@ app.post("/api/teachers", auth, schoolAdmin, (req, res) => {
     if (
       !x.name ||
       !x.email ||
-      String(x.password || "").length < 8 ||
+      !validPassword(x.password) ||
       !["小学", "初中", "高中"].includes(x.stage) ||
       !x.subject ||
       !x.className
@@ -504,7 +559,7 @@ app.get("/api/students", auth, schoolStaff, (req, res) =>
 app.post("/api/students", auth, schoolStaff, (req, res) => {
   try {
     const x = req.body;
-    if (!x.name || !x.email || String(x.password || "").length < 8)
+    if (!x.name || !x.email || !validPassword(x.password))
       return res
         .status(400)
         .json({ error: "姓名、邮箱必填，初始密码至少 8 位" });
@@ -596,7 +651,7 @@ app.post(
             !name ||
             !email ||
             !["小学", "初中", "高中"].includes(stage) ||
-            initialPassword.length < 8
+            !validPassword(initialPassword)
           )
             throw new Error("姓名、邮箱、学段或密码格式无效");
           const id = uid();
@@ -666,6 +721,7 @@ app.post(
   auth,
   teacher,
   upload.single("file"),
+  validateUploads,
   async (req, res) => {
     if (!req.file)
       return res
@@ -742,6 +798,23 @@ app.post("/api/assignments", auth, teacher, (req, res) => {
   const x = req.body;
   if (!x.title || !x.questions?.length)
     return res.status(400).json({ error: "请至少录入一道真实题目" });
+  if (
+    !Array.isArray(x.questions) ||
+    x.questions.length > 500 ||
+    x.questions.some(
+      (q) =>
+        !q ||
+        typeof q.prompt !== "string" ||
+        typeof q.standardAnswer !== "string" ||
+        !Number.isFinite(Number(q.score)) ||
+        Number(q.score) < 0 ||
+        (q.knowledgeId &&
+          !db
+            .prepare("SELECT id FROM knowledge WHERE id=? AND school_id=?")
+            .get(q.knowledgeId, req.user.school_id)),
+    )
+  )
+    return res.status(400).json({ error: "题目或知识点无效" });
   const id = uid();
   db.exec("BEGIN");
   try {
@@ -776,10 +849,50 @@ app.post("/api/assignments", auth, teacher, (req, res) => {
     res.status(400).json({ error: "保存失败" });
   }
 });
-app.get("/api/assignments/:id", auth, (req, res) => {
+function accessibleAssignment(req) {
   const a = db
     .prepare("SELECT * FROM assignments WHERE id=? AND school_id=?")
     .get(req.params.id, req.user.school_id);
+  if (!a) return null;
+  if (req.user.role === "teacher")
+    return req.user.is_school_admin || a.teacher_id === req.user.id ? a : null;
+  return a.status === "published" &&
+    a.stage === req.user.stage &&
+    a.class_name === req.user.class_name
+    ? a
+    : null;
+}
+
+function submissionFor(req) {
+  const s = db
+    .prepare(
+      "SELECT s.*,a.school_id,a.teacher_id FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=? AND a.school_id=?",
+    )
+    .get(req.params.id, req.user.school_id);
+  if (!s) return null;
+  return req.user.role === "teacher"
+    ? req.user.is_school_admin || s.teacher_id === req.user.id
+      ? s
+      : null
+    : s.student_id === req.user.id
+      ? s
+      : null;
+}
+
+// Uploaded student work is private, including legacy /uploads URLs.
+app.get("/uploads/:name", auth, (req, res) => {
+  const s = db
+    .prepare("SELECT id FROM submissions WHERE file_path=?")
+    .get(path.join(files, req.params.name));
+  if (!s || !submissionFor({ ...req, params: { id: s.id } }))
+    return res.status(404).json({ error: "文件不存在" });
+  res.setHeader("Content-Disposition", "attachment");
+  res.setHeader("Cache-Control", "private, no-store");
+  res.sendFile(path.join(files, req.params.name));
+});
+
+app.get("/api/assignments/:id", auth, (req, res) => {
+  const a = accessibleAssignment(req);
   if (!a) return res.status(404).json({ error: "作业不存在" });
   res.json({
     ...a,
@@ -787,17 +900,30 @@ app.get("/api/assignments/:id", auth, (req, res) => {
       .prepare(
         "SELECT q.*,k.title knowledge_title FROM questions q LEFT JOIN knowledge k ON k.id=q.knowledge_id WHERE assignment_id=? ORDER BY number",
       )
-      .all(a.id),
+      .all(a.id)
+      .map((question) => {
+        if (req.user.role === "student") {
+          const { standard_answer, ...visible } = question;
+          return visible;
+        }
+        return question;
+      }),
   });
 });
 app.post(
   "/api/assignments/:id/submissions",
   auth,
+  (req, res, next) => {
+    const a = accessibleAssignment(req);
+    if (!a || req.user.is_school_admin)
+      return res.status(404).json({ error: "作业不存在" });
+    req.assignment = a;
+    next();
+  },
   upload.array("files", 10),
+  validateUploads,
   (req, res) => {
-    const a = db
-      .prepare("SELECT * FROM assignments WHERE id=? AND school_id=?")
-      .get(req.params.id, req.user.school_id);
+    const a = req.assignment;
     if (!a) return res.status(404).json({ error: "作业不存在" });
     const linkedStudent =
       req.user.role === "student"
@@ -811,29 +937,44 @@ app.post(
           : null;
     if (req.user.role === "teacher" && req.body.studentId && !linkedStudent)
       return res.status(400).json({ error: "学生账户不存在或不属于本校" });
+    if (
+      linkedStudent &&
+      (linkedStudent.stage !== a.stage ||
+        linkedStudent.class_name !== a.class_name)
+    )
+      return res.status(400).json({ error: "学生不属于作业班级" });
+    if (!req.files?.length)
+      return res.status(400).json({ error: "请选择支持的作业文件" });
     const rows = [];
-    for (const f of req.files || []) {
-      const id = uid(),
-        target = path.join(
-          files,
-          `${id}${path.extname(f.originalname).slice(0, 10)}`,
+    const saved = [];
+    db.exec("BEGIN");
+    try {
+      for (const f of req.files || []) {
+        const id = uid(),
+          target = path.join(files, `${id}${f.safeExtension}`);
+        fs.renameSync(f.path, target);
+        saved.push(target);
+        db.prepare(
+          "INSERT INTO submissions(id,assignment_id,student_id,student_name,file_path,file_type,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        ).run(
+          id,
+          a.id,
+          linkedStudent?.id || null,
+          linkedStudent?.name || req.body.studentName || req.user.name,
+          target,
+          f.mimetype,
+          "uploaded",
+          iso(),
         );
-      fs.renameSync(f.path, target);
-      db.prepare(
-        "INSERT INTO submissions(id,assignment_id,student_id,student_name,file_path,file_type,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
-      ).run(
-        id,
-        a.id,
-        linkedStudent?.id || null,
-        linkedStudent?.name || req.body.studentName || req.user.name,
-        target,
-        f.mimetype,
-        "uploaded",
-        iso(),
-      );
-      rows.push({ id, name: f.originalname });
+        rows.push({ id, name: f.originalname });
+      }
+      db.exec("COMMIT");
+      res.json(rows);
+    } catch (error) {
+      db.exec("ROLLBACK");
+      saved.forEach((file) => fs.rmSync(file, { force: true }));
+      throw error;
     }
-    res.json(rows);
   },
 );
 app.get("/api/submissions", auth, teacher, (req, res) =>
@@ -846,18 +987,24 @@ app.get("/api/submissions", auth, teacher, (req, res) =>
   ),
 );
 app.get("/api/submissions/:id", auth, (req, res) => {
-  const s = db
-    .prepare(
-      "SELECT s.*,a.school_id FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=? AND a.school_id=?",
-    )
-    .get(req.params.id, req.user.school_id);
+  const s = submissionFor(req);
   if (!s) return res.status(404).json({ error: "提交不存在" });
   res.json({
     ...s,
     file_path: undefined,
-    analysis: s.analysis_json ? JSON.parse(s.analysis_json) : null,
+    analysis_json:
+      req.user.role === "student" && !s.teacher_reviewed
+        ? null
+        : s.analysis_json,
+    ocr_text:
+      req.user.role === "student" && !s.teacher_reviewed ? null : s.ocr_text,
+    analysis:
+      s.analysis_json && (req.user.role !== "student" || s.teacher_reviewed)
+        ? JSON.parse(s.analysis_json)
+        : null,
   });
 });
+const recognitionJobs = new Set();
 app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
   const s = db
     .prepare(
@@ -865,10 +1012,13 @@ app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
     )
     .get(req.params.id, req.user.id);
   if (!s) return res.status(404).json({ error: "提交不存在" });
+  if (recognitionJobs.has(s.id))
+    return res.status(409).json({ error: "识别正在进行中" });
+  recognitionJobs.add(s.id);
   try {
-    db.prepare("UPDATE submissions SET status='recognizing' WHERE id=?").run(
-      s.id,
-    );
+    db.prepare(
+      "UPDATE submissions SET status='recognizing',teacher_reviewed=0,score=NULL WHERE id=?",
+    ).run(s.id);
     const qs = db
       .prepare(
         "SELECT q.*,k.title knowledge_title FROM questions q LEFT JOIN knowledge k ON k.id=q.knowledge_id WHERE assignment_id=? ORDER BY number",
@@ -883,12 +1033,14 @@ app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
       : await documentImages(s.file_path, s.file_type);
     const parsed = await askModel(req.user.id, prompt, images);
     db.prepare(
-      "UPDATE submissions SET status='review',ocr_text=?,analysis_json=? WHERE id=?",
+      "UPDATE submissions SET status='review',teacher_reviewed=0,score=NULL,ocr_text=?,analysis_json=? WHERE id=?",
     ).run(parsed.ocrText || "", JSON.stringify(parsed), s.id);
     res.json(parsed);
   } catch (e) {
     db.prepare("UPDATE submissions SET status='failed' WHERE id=?").run(s.id);
     res.status(502).json({ error: String(e.message || e) });
+  } finally {
+    recognitionJobs.delete(s.id);
   }
 });
 app.post("/api/submissions/:id/review", auth, teacher, (req, res) => {
@@ -898,6 +1050,25 @@ app.post("/api/submissions/:id/review", auth, teacher, (req, res) => {
     )
     .get(req.params.id, req.user.id);
   if (!s) return res.status(404).json({ error: "提交不存在" });
+  if (recognitionJobs.has(s.id))
+    return res.status(409).json({ error: "请等待识别完成后再复核" });
+  const questions = db
+    .prepare("SELECT id,knowledge_id FROM questions WHERE assignment_id=?")
+    .all(s.assignment_id);
+  const questionMap = new Map(questions.map((q) => [q.id, q.knowledge_id]));
+  const items = req.body.items;
+  if (
+    !Array.isArray(items) ||
+    items.length !== questions.length ||
+    new Set(items.map((item) => item?.questionId)).size !== questions.length ||
+    items.some(
+      (item) =>
+        !item ||
+        !questionMap.has(item.questionId) ||
+        typeof item.isCorrect !== "boolean",
+    )
+  )
+    return res.status(400).json({ error: "复核题目必须与本作业一致且不重复" });
   db.exec("BEGIN");
   try {
     db.prepare("DELETE FROM mistakes WHERE submission_id=?").run(s.id);
@@ -910,7 +1081,7 @@ app.post("/api/submissions/:id/review", auth, teacher, (req, res) => {
         s.id,
         s.student_id,
         x.questionId,
-        x.knowledgeId || null,
+        questionMap.get(x.questionId) || null,
         x.reason || "待归因",
         x.studentAnswer || "",
         x.correction || "",
@@ -1010,7 +1181,10 @@ app.post("/api/papers/generate", auth, teacher, (req, res) => {
     .prepare(
       "SELECT DISTINCT q.id,q.prompt,q.standard_answer,k.title knowledge_title FROM mistakes m JOIN questions q ON q.id=m.question_id JOIN submissions s ON s.id=m.submission_id JOIN assignments a ON a.id=s.assignment_id LEFT JOIN knowledge k ON k.id=m.knowledge_id WHERE a.teacher_id=? ORDER BY RANDOM() LIMIT ?",
     )
-    .all(req.user.id, Math.min(Number(req.body.count) || 10, 50));
+    .all(
+      req.user.id,
+      Math.max(1, Math.min(Math.floor(Number(req.body.count)) || 10, 50)),
+    );
   const id = uid(),
     title = req.body.title || "错题巩固卷";
   db.prepare("INSERT INTO papers VALUES(?,?,?,?,?,?)").run(
@@ -1043,7 +1217,9 @@ const analysisJson = (raw) => {
   const body = fenced ? fenced[1].trim() : text;
   const start = body.indexOf("{");
   const end = body.lastIndexOf("}");
-  return JSON.parse(start >= 0 && end > start ? body.slice(start, end + 1) : body);
+  return JSON.parse(
+    start >= 0 && end > start ? body.slice(start, end + 1) : body,
+  );
 };
 
 function loadTeachingStats(assignmentId, userId) {
@@ -1086,7 +1262,7 @@ function courseKnowledgeLabels(stats) {
     .map((row) => row.title);
 }
 
-app.get("/api/teaching/assignments", auth, (req, res) => {
+app.get("/api/teaching/assignments", auth, schoolStaff, (req, res) => {
   const rows = req.user.is_school_admin
     ? db
         .prepare(
@@ -1115,9 +1291,10 @@ app.get("/api/teaching/assignments", auth, (req, res) => {
   );
 });
 
-app.get("/api/teaching/assignments/:id", auth, (req, res) => {
+app.get("/api/teaching/assignments/:id", auth, schoolStaff, (req, res) => {
   const stats = loadTeachingStats(req.params.id, req.user.id);
-  if (!stats) return res.status(404).json({ error: "作业不存在或不属于你的账户" });
+  if (!stats)
+    return res.status(404).json({ error: "作业不存在或不属于你的账户" });
   res.json({
     stats,
     analysis: latestAnalysis(req.params.id, "class", null, req.user.id),
@@ -1140,11 +1317,12 @@ app.post(
   teachingAuthor,
   async (req, res) => {
     const stats = loadTeachingStats(req.params.id, req.user.id);
-    if (!stats) return res.status(404).json({ error: "作业不存在或不属于你的账户" });
+    if (!stats)
+      return res.status(404).json({ error: "作业不存在或不属于你的账户" });
     if (!stats.overview.mistakeCount)
-      return res
-        .status(400)
-        .json({ error: "这份作业还没有已复核错题，先完成识别与复核再生成分析" });
+      return res.status(400).json({
+        error: "这份作业还没有已复核错题，先完成识别与复核再生成分析",
+      });
     try {
       const payload = promptPayload(stats, {
         knowledgeLabels: courseKnowledgeLabels(stats),
@@ -1186,7 +1364,12 @@ app.post(
         iso(),
       );
       res.json({
-        analysis: { id, model: provider?.model || "", created_at: iso(), content },
+        analysis: {
+          id,
+          model: provider?.model || "",
+          created_at: iso(),
+          content,
+        },
         stats,
       });
     } catch (error) {
@@ -1201,7 +1384,8 @@ app.post(
   teachingAuthor,
   async (req, res) => {
     const stats = loadTeachingStats(req.params.id, req.user.id);
-    if (!stats) return res.status(404).json({ error: "作业不存在或不属于你的账户" });
+    if (!stats)
+      return res.status(404).json({ error: "作业不存在或不属于你的账户" });
     if (!stats.overview.mistakeCount)
       return res.status(400).json({ error: "暂无已复核错题，无法归因" });
     try {
@@ -1237,10 +1421,13 @@ app.post(
   teachingAuthor,
   async (req, res) => {
     const stats = loadTeachingStats(req.params.id, req.user.id);
-    if (!stats) return res.status(404).json({ error: "作业不存在或不属于你的账户" });
+    if (!stats)
+      return res.status(404).json({ error: "作业不存在或不属于你的账户" });
     const student = buildStudentStats(stats, req.params.studentId);
     if (!student || !student.student)
-      return res.status(404).json({ error: "这位学生在这份作业中没有已复核错题" });
+      return res
+        .status(404)
+        .json({ error: "这位学生在这份作业中没有已复核错题" });
     try {
       const payload = promptPayload(stats, { student: student.student });
       const raw = await askModel(
@@ -1273,7 +1460,12 @@ app.post(
         iso(),
       );
       res.json({
-        analysis: { id, model: provider?.model || "", created_at: iso(), content },
+        analysis: {
+          id,
+          model: provider?.model || "",
+          created_at: iso(),
+          content,
+        },
       });
     } catch (error) {
       res.status(502).json({ error: error.message || "学生诊断生成失败" });
@@ -1287,10 +1479,13 @@ app.get(
   schoolStaff,
   (req, res) => {
     const stats = loadTeachingStats(req.params.id, req.user.id);
-    if (!stats) return res.status(404).json({ error: "作业不存在或不属于你的账户" });
+    if (!stats)
+      return res.status(404).json({ error: "作业不存在或不属于你的账户" });
     const student = buildStudentStats(stats, req.params.studentId);
     if (!student || !student.student)
-      return res.status(404).json({ error: "这位学生在这份作业中没有已复核错题" });
+      return res
+        .status(404)
+        .json({ error: "这位学生在这份作业中没有已复核错题" });
     res.json({
       ...student,
       analysis: latestAnalysis(
@@ -1312,6 +1507,17 @@ app.put(
       .prepare("SELECT id FROM assignments WHERE id=? AND teacher_id=?")
       .get(req.params.id, req.user.id);
     if (!assignment) return res.status(404).json({ error: "作业不存在" });
+    const student = db
+      .prepare(
+        "SELECT id FROM users WHERE id=? AND school_id=? AND role='student' AND stage=(SELECT stage FROM assignments WHERE id=?) AND class_name=(SELECT class_name FROM assignments WHERE id=?)",
+      )
+      .get(
+        req.params.studentId,
+        req.user.school_id,
+        req.params.id,
+        req.params.id,
+      );
+    if (!student) return res.status(404).json({ error: "学生不属于作业班级" });
     const level = ["watch", "follow", "priority"].includes(req.body.level)
       ? req.body.level
       : "follow";
@@ -1344,14 +1550,16 @@ app.post(
   teachingAuthor,
   (req, res) => {
     const stats = loadTeachingStats(req.params.id, req.user.id);
-    if (!stats) return res.status(404).json({ error: "作业不存在或不属于你的账户" });
+    if (!stats)
+      return res.status(404).json({ error: "作业不存在或不属于你的账户" });
     const wanted = Array.isArray(req.body.numbers)
       ? req.body.numbers.map(Number)
       : [];
     const source = stats.highFrequencyQuestions.filter(
       (question) => !wanted.length || wanted.includes(question.number),
     );
-    if (!source.length) return res.status(400).json({ error: "请选择要重新布置的错题" });
+    if (!source.length)
+      return res.status(400).json({ error: "请选择要重新布置的错题" });
     const id = uid();
     const title = String(
       req.body.title ||
@@ -1359,9 +1567,7 @@ app.post(
     ).slice(0, 80);
     db.exec("BEGIN");
     try {
-      db.prepare(
-        "INSERT INTO assignments VALUES(?,?,?,?,?,?,?,?,?,?)",
-      ).run(
+      db.prepare("INSERT INTO assignments VALUES(?,?,?,?,?,?,?,?,?,?)").run(
         id,
         req.user.school_id,
         req.user.id,
@@ -1373,9 +1579,7 @@ app.post(
         "published",
         iso(),
       );
-      const insert = db.prepare(
-        "INSERT INTO questions VALUES(?,?,?,?,?,?,?)",
-      );
+      const insert = db.prepare("INSERT INTO questions VALUES(?,?,?,?,?,?,?)");
       source.forEach((question, index) =>
         insert.run(
           uid(),

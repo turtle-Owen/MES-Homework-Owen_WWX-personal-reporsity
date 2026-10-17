@@ -8,6 +8,7 @@
 
 #include "cloudflare.h"
 #include "util.h"
+#include "security.h"
 
 namespace sc {
 
@@ -260,6 +261,11 @@ bool Deployer::installMinGitByDownload() {
 }
 
 bool Deployer::installDependencies(std::vector<Dependency> &dependencies) {
+  if (!security::shellPath(envVar("LOCALAPPDATA")) || !security::shellPath(currentDir()) ||
+      !security::shellPath(envVar("TEMP"))) {
+    emit("error", "安装目录包含不支持的 shell 字符");
+    return false;
+  }
   bool allReady = true;
   for (Dependency &dependency : dependencies) {
     if (dependency.available) continue;
@@ -360,6 +366,11 @@ bool buildUpToDate(const std::string &projectDir) {
 }  // namespace
 
 bool Deployer::ensureSource(bool allowDownload) {
+  if (!security::repo(options_.repo) || !security::shellPath(options_.projectDir) ||
+      !security::shellPath(currentDir()) || !security::shellPath(envVar("TEMP"))) {
+    emit("error", "源码地址或目录包含不支持的 shell 字符");
+    return false;
+  }
   // 1) 命令行指定
   if (!options_.projectDir.empty()) {
     if (looksLikeProject(options_.projectDir)) {
@@ -375,6 +386,10 @@ bool Deployer::ensureSource(bool allowDownload) {
     wchar_t buffer[MAX_PATH] = {0};
     GetModuleFileNameW(nullptr, buffer, MAX_PATH);
     exeDir = parentDir(wideToUtf8(buffer));
+  }
+  if (!security::shellPath(exeDir)) {
+    emit("error", "程序路径包含不支持的 shell 字符");
+    return false;
   }
   if (looksLikeProject(exeDir)) {
     projectDir_ = exeDir;
@@ -497,7 +512,11 @@ bool Deployer::prepareEnvFile() {
     std::string text = trim(line);
     if (startsWith(text, "APP_SECRET=")) {
       std::string value = trim(text.substr(std::string("APP_SECRET=").size()));
-      if (value.size() >= 32) appSecret_ = value;
+      if (value.size() < 32) {
+        emit("error", "已有 APP_SECRET 太短，请保留原值并手动检查配置");
+        return false;
+      }
+      appSecret_ = value;
     }
   }
   if (appSecret_.empty()) {
@@ -506,8 +525,14 @@ bool Deployer::prepareEnvFile() {
   }
 
   std::ostringstream out;
+  // Keep provider/security configuration and the original secret representation intact.
+  for (const std::string &line : splitLines(content)) {
+    const std::string key = trim(line.substr(0, line.find('=')));
+    if (key == "PORT" || key == "HOST" || key == "NODE_ENV" || key == "APP_SECRET") continue;
+    out << line << "\n";
+  }
   out << "PORT=" << options_.port << "\n";
-  out << "DATA_DIR=./data\n";
+
   out << "APP_SECRET=" << appSecret_ << "\n";
   out << "NODE_ENV=production\n";
   out << "HOST=" << (options_.mode == Mode::Lan || options_.mode == Mode::QuickTunnel ||
@@ -516,7 +541,7 @@ bool Deployer::prepareEnvFile() {
                         : "127.0.0.1")
       << "\n";
   if (!writeFileUtf8(envPath, out.str())) {
-    emit("warn", "无法写入 .env，将改用命令行环境变量启动");
+    emit("warn", "无法写入 .env，停止部署");
     return false;
   }
   emit("ok", "已写入运行配置：" + envPath);
@@ -553,9 +578,7 @@ bool Deployer::startServer() {
     return false;
   }
   std::ostringstream command;
-  command << "set \"PORT=" << options_.port << "\" && set \"HOST=0.0.0.0\" && set \"NODE_ENV=production\"";
-  if (!appSecret_.empty()) command << " && set \"APP_SECRET=" << appSecret_ << "\"";
-  command << " && node server/index.mjs";
+  command << "node --env-file=.env server/index.mjs";
 
   emit("info", "启动服务进程（端口 " + std::to_string(options_.port) + "）…");
   unsigned long pid = 0;
@@ -640,6 +663,11 @@ bool Deployer::startCustomDomainTunnel() {
     }
   }
 
+  if (!security::domain(tunnelId)) {
+    emit("error", "凭证文件中的隧道 ID 无效");
+    return false;
+  }
+
   // 2) 用 Cloudflare API 创建隧道（需要 API Token）
   if (tunnelId.empty() && !options_.apiToken.empty()) {
     std::string accountId;
@@ -680,12 +708,17 @@ bool Deployer::startCustomDomainTunnel() {
     return false;
   }
 
+  if (!security::domain(tunnelId)) {
+    emit("error", "Cloudflare 返回的隧道 ID 无效");
+    return false;
+  }
+
   // 3) 写入隧道配置（凭证文件缺失时用令牌方式启动）
   const std::string configFile = joinPath(configDir, "config.yml");
   const bool hasCredentials = isFile(credentialsFile);
   std::ostringstream config;
   config << "tunnel: " << (tunnelId.empty() ? "smart-campus-homework" : tunnelId) << "\n";
-  config << "credentials-file: " << replaceAll(credentialsFile, "\\", "/") << "\n";
+  config << "credentials-file: \"" << replaceAll(credentialsFile, "\\", "/") << "\"\n";
   config << "ingress:\n";
   config << "  - hostname: " << options_.domain << "\n";
   config << "    service: " << localUrl_ << "\n";
@@ -766,6 +799,14 @@ bool Deployer::startCustomDomainTunnel() {
 // ============================ 主流程 ============================
 
 bool Deployer::deploy(std::vector<std::string> &publicUrls) {
+  if (options_.port < 1 || options_.port > 65535 ||
+      !security::domain(options_.domain) || !security::token(options_.apiToken) ||
+      !security::token(options_.tunnelToken) || !security::domain(options_.tunnelId) ||
+      !security::shellPath(envVar("USERPROFILE"))) {
+    emit("error", "部署参数格式无效");
+    return false;
+  }
+  stop();
   steps_.clear();
   publicUrls_.clear();
   ownsServer_ = false;
@@ -824,7 +865,10 @@ bool Deployer::deploy(std::vector<std::string> &publicUrls) {
 
   // 4) 配置
   setStep(stepConfig, StepState::Running);
-  prepareEnvFile();
+  if (!prepareEnvFile()) {
+    setStep(stepConfig, StepState::Failed, "无法保存运行配置");
+    return false;
+  }
   setStep(stepConfig, StepState::Done, ".env 已写入");
 
   // 5) 启动
@@ -833,7 +877,7 @@ bool Deployer::deploy(std::vector<std::string> &publicUrls) {
     setStep(stepStart, StepState::Failed);
     return false;
   }
-  setStep(stepStart, StepState::Done, "PID " + std::to_string((unsigned long)GetProcessId((HANDLE)serverProcess_)));
+  setStep(stepStart, StepState::Done, reusedServer_ ? "复用现有服务" : "PID " + std::to_string((unsigned long)GetProcessId((HANDLE)serverProcess_)));
 
   // 6) 健康检查
   setStep(stepHealth, StepState::Running);

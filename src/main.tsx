@@ -305,7 +305,7 @@ function Empty({ text }: { text: string }) {
 }
 function Auth({ onDone }: { onDone: () => void }) {
   const [mode, setMode] = useState<"login" | "register" | "school">("login"),
-    [role, setRole] = useState<"teacher" | "student">("teacher"),
+    [role] = useState("student"),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -380,22 +380,7 @@ function Auth({ onDone }: { onDone: () => void }) {
             </p>
           </div>
           {mode === "register" && (
-            <div className="role-pills">
-              <button
-                type="button"
-                className={role === "teacher" ? "active" : ""}
-                onClick={() => setRole("teacher")}
-              >
-                教师
-              </button>
-              <button
-                type="button"
-                className={role === "student" ? "active" : ""}
-                onClick={() => setRole("student")}
-              >
-                学生
-              </button>
-            </div>
+            <p>学生可凭学校注册码注册。教师账户请联系学校管理员创建。</p>
           )}
           {mode !== "login" && (
             <Field
@@ -461,7 +446,6 @@ function Auth({ onDone }: { onDone: () => void }) {
               className="switch-auth"
               onClick={() => {
                 setMode("school");
-                setRole("teacher");
                 setError("");
               }}
             >
@@ -651,7 +635,8 @@ function Overview({
           <span className="eyebrow">AI TEACHING ANALYSIS</span>
           <h2>复核完成后，直接得到能上课的讲评方案</h2>
           <p>
-            AI 教学分析把已复核的错题换算成班级知识点掌握率、错因占比、高频错题讲评脚本、
+            AI
+            教学分析把已复核的错题换算成班级知识点掌握率、错因占比、高频错题讲评脚本、
             分层辅导名单与课后重练作业，不用再手工统计。
           </p>
         </div>

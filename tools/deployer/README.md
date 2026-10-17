@@ -97,7 +97,7 @@ powershell -ExecutionPolicy Bypass -File tools/deployer/build.ps1
 ```powershell
 g++ -std=c++17 -O2 -static -static-libgcc -static-libstdc++ `
   tools/deployer/src/*.cpp -o dist-deployer/campus-deploy.exe `
-  -lws2_32 -liphlpapi -lshell32 -ladvapi32 -lole32
+  -lws2_32 -liphlpapi -lshell32 -lbcrypt -ladvapi32 -lole32
 ```
 
 产物为静态链接的单文件程序，可直接拷到其它 Windows 10/11 机器运行。
@@ -138,3 +138,16 @@ tools/deployer/
 - 仅支持 Windows（使用 Win32 API）。
 - 首次在局域网内访问若被防火墙拦截，程序会打印一条 `netsh advfirewall` 命令，需要管理员权限执行一次。
 - 自定义域名模式依赖 Cloudflare API；若域名未托管在 Cloudflare，程序会明确报错并建议改用手动配置。
+
+### 安全回归检查（无需 Windows）
+
+```sh
+g++ -std=c++17 -Wall -Wextra -pedantic tools/deployer/tests/security_test.cpp tools/deployer/src/json.cpp -o /tmp/deployer-security-test
+/tmp/deployer-security-test
+```
+
+此检查覆盖控制台 Host/Origin 边界、命令参数与配置注入、请求体长度解析、接收截止时间的剩余时长计算、后台任务复位守卫、停止服务的忙状态判断和 JSON 嵌套上限。完整部署器依赖 Win32；上述检查不包含套接字接收、线程调度或实际停止服务测试，不能替代 Windows 上的构建和浏览器端到端验证。
+
+控制台仅接受 `127.0.0.1:<端口>`，修改操作要求浏览器同源 Origin；跨站调用以及自定义域名指向本机的请求会被拒绝。请求头和请求体各限制为 16 KiB，完整接收请求最多 5 秒。任务执行期间不能停止服务。部署参数及路径包含 shell 特殊字符时会明确拒绝。
+
+服务通过 Node.js `--env-file=.env` 读取配置，不把 APP_SECRET 放到 shell 命令中。已有 APP_SECRET 和其他配置会保留；已有密钥过短或配置无法写入时部署会中止。新密钥使用 Windows 系统安全随机数。

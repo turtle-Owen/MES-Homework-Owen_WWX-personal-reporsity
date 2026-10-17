@@ -12,32 +12,50 @@ export async function documentImages(filePath, mimeType, maxPages = 10) {
   }
 
   const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const pdf = await getDocument({
+  const loading = getDocument({
     data: new Uint8Array(source),
     disableWorker: true,
     useSystemFonts: true,
-  }).promise;
-  if (pdf.numPages > maxPages) {
-    throw new Error(`PDF 共 ${pdf.numPages} 页，单次最多识别 ${maxPages} 页，请拆分后上传`);
+    isEvalSupported: false,
+  });
+  try {
+    const pdf = await loading.promise;
+    if (pdf.numPages > maxPages) {
+      throw new Error(
+        `PDF 共 ${pdf.numPages} 页，单次最多识别 ${maxPages} 页，请拆分后上传`,
+      );
+    }
+    const pages = [];
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 2 });
+      if (
+        !Number.isFinite(viewport.width) ||
+        !Number.isFinite(viewport.height) ||
+        viewport.width <= 0 ||
+        viewport.height <= 0 ||
+        viewport.width > 10000 ||
+        viewport.height > 10000 ||
+        viewport.width * viewport.height > 16000000
+      )
+        throw new Error("PDF 页面尺寸过大，请缩小后上传");
+      const canvas = createCanvas(
+        Math.ceil(viewport.width),
+        Math.ceil(viewport.height),
+      );
+      const canvasContext = canvas.getContext("2d");
+      await page.render({ canvas, canvasContext, viewport }).promise;
+      pages.push({
+        mimeType: "image/jpeg",
+        base64: canvas.toBuffer("image/jpeg", 88).toString("base64"),
+      });
+      page.cleanup();
+    }
+    if (typeof pdf.cleanup === "function") await pdf.cleanup();
+    return pages;
+  } finally {
+    await loading.destroy();
   }
-  const pages = [];
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 2 });
-    const canvas = createCanvas(
-      Math.ceil(viewport.width),
-      Math.ceil(viewport.height),
-    );
-    const canvasContext = canvas.getContext("2d");
-    await page.render({ canvas, canvasContext, viewport }).promise;
-    pages.push({
-      mimeType: "image/jpeg",
-      base64: canvas.toBuffer("image/jpeg", 88).toString("base64"),
-    });
-    page.cleanup();
-  }
-  if (typeof pdf.cleanup === "function") await pdf.cleanup();
-  return pages;
 }
 
 export function cleanModelJson(value) {

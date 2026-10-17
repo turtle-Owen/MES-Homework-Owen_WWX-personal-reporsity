@@ -68,6 +68,14 @@ npm start
 
 For development, run `npm run dev:server` and `npm run dev` separately, then visit `http://127.0.0.1:5173`. Production server listens on `127.0.0.1:8787` by default; use `HOST=0.0.0.0` to allow LAN access. Data is stored in `data/smart-campus.sqlite`, with original files in `data/uploads/`.
 
+## Security update (2026-10-17)
+
+School administrators must create teacher accounts; public registration is student-only. Students cannot change their own stage/class. Submission files and answers require the submitting student, owning teacher, or school administrator. Student assignment responses omit reference answers. Re-recognition requires fresh teacher approval.
+
+Model endpoints are restricted to the selected vendor's HTTPS origin. Deployment administrators may approve exact custom origins in comma-separated `PROVIDER_ALLOWED_ORIGINS`; existing stored endpoints are also checked on every call. Do not approve user-controlled domains or private-network addresses. Worker/reverse-proxy deployments must set `APP_ORIGIN=https://your-frontend-domain` on the API server, without a path or trailing slash. Client-supplied forwarding headers are not trusted. Production requires a valid `APP_SECRET` and HTTPS (Secure session cookies).
+
+Environment variables must be passed to the process; start with `node --env-file=.env server/index.mjs` when using `.env`. See [SECURITY_REVIEW.md](SECURITY_REVIEW.md) for findings, regression coverage, and remaining limitations.
+
 ## Recommended Workflow
 
 1. Select "Register New School" and fill in school and administrator details.
@@ -102,7 +110,7 @@ npx wrangler deploy
 ## Pre-Launch Checklist
 
 - Set up a fixed HTTPS domain, a strong random `APP_SECRET`, and daily offline backups.
-- Establish administrator approval, email verification, password recovery, and login rate limiting for teacher onboarding.
+- Add email verification, password recovery, and enrollment verification. Login rate limits currently use the source IP; users behind a reverse proxy may share a quota.
 - Add virus scanning for uploaded files and define retention/deletion policies for originals, recognized text, and account data.
 - Confirm minor data processing terms with OCR providers and evaluate recognition rates with real school samples.
 - SQLite suits single-machine or single-writer setups; multi-node deployments require migration to an external database and object storage.
