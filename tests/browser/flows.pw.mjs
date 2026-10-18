@@ -232,6 +232,7 @@ test("late generated teaching plan cannot appear on another assignment", async (
     },
   );
   await page
+    .locator(".ta-head")
     .getByRole("button", { name: "生成 AI 教学方案", exact: true })
     .click();
   await held.promise;
