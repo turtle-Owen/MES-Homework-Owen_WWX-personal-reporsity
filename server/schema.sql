@@ -19,3 +19,6 @@ CREATE INDEX IF NOT EXISTS idx_analyses_assignment ON teaching_analyses(assignme
 
 CREATE TABLE IF NOT EXISTS submission_files(id TEXT PRIMARY KEY,submission_id TEXT NOT NULL,position INTEGER NOT NULL,file_path TEXT NOT NULL UNIQUE,file_type TEXT NOT NULL,original_name TEXT NOT NULL,FOREIGN KEY(submission_id) REFERENCES submissions(id) ON DELETE CASCADE,UNIQUE(submission_id,position));
 CREATE INDEX IF NOT EXISTS idx_submission_files_submission ON submission_files(submission_id,position);
+
+CREATE TABLE IF NOT EXISTS model_usage(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,school_id TEXT NOT NULL,created_at INTEGER NOT NULL,finished_at INTEGER,lease_until INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_model_usage_school_time ON model_usage(school_id,created_at);

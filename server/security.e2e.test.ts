@@ -175,6 +175,22 @@ describe("HTTP authorization regressions (isolated SQLite; no model requests)", 
     expect(download.status).toBe(200);
     expect(download.headers.get("content-disposition")).toBe("attachment");
   });
+  it("exposes official review answers only to authorized staff", async () => {
+    const staff = await (
+      await request(`/api/submissions/${submissionId}`, teacher)
+    ).json();
+    const learner = await (
+      await request(`/api/submissions/${submissionId}`, student)
+    ).json();
+    expect(staff.questions.length).toBeGreaterThan(0);
+    expect(
+      staff.questions.every((q: any) => typeof q.standard_answer === "string"),
+    ).toBe(true);
+    expect(
+      learner.questions.every((q: any) => !Object.hasOwn(q, "standard_answer")),
+    ).toBe(true);
+    expect(staff.files.length).toBeGreaterThan(0);
+  });
   it("hides standard answers and enforces class/teacher scope on assignment details", async () => {
     const assignment = await (
       await request(`/api/assignments/${fixture.assignmentId}`, student)
@@ -347,13 +363,21 @@ describe("HTTP authorization regressions (isolated SQLite; no model requests)", 
   it("hides unreviewed OCR and model output, including after re-recognition", async () => {
     expect(
       (
+        await request("/api/settings/provider", teacher, "PUT", {
+          provider: "openai",
+          apiKey: "mock-only",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
         await request(
           `/api/submissions/${submissionId}/recognize`,
           teacher,
           "POST",
         )
       ).status,
-    ).toBe(502);
+    ).toBe(200);
     const row = await (
       await request(`/api/submissions/${submissionId}`, student)
     ).json();

@@ -27,10 +27,10 @@ campus-deploy.exe --mode domain --domain hw.example.com --api-token cf_xxx
 ### 自定义域名需要什么
 
 1. 域名已托管在 Cloudflare（DNS 在 Cloudflare 上）。
-2. 一个 API Token，权限为 `Zone → DNS → Edit`（在 Cloudflare 面板「我的个人资料 → API 令牌」创建）。
+2. 一个 API Token，权限包含 `Zone → DNS → Edit`、`Zone → Zone → Read`；自动创建隧道还需要 `Account → Cloudflare Tunnel → Edit` 和读取账户的权限（在 Cloudflare 面板「我的个人资料 → API 令牌」创建）。
 3. 二选一提供隧道凭据：
-   - 只给 API Token：程序会在你的账户里自动创建名为 `smart-campus-homework` 的命名隧道；
-   - 或者先在 Zero Trust 面板创建隧道，把**连接器令牌**用 `--tunnel-token` 传入。
+   - 只给 API Token：程序会在你的账户里自动创建名为 `smart-campus-homework` 的本地管理隧道，并保存匹配的随机密钥到 `~/.cloudflared/tunnel.json`；写入失败将停止部署，不修改 DNS。
+   - 或者先在 Zero Trust 面板创建隧道，把**连接器令牌**用 `--tunnel-token` 传入，并在面板配置该域名到本地服务地址的路由；不填写 `--tunnel-id` 时 DNS 需手动配置。
 
 程序会自动完成：定位 DNS 区域 → 创建/更新指向隧道的 CNAME 记录 → 写入 `~/.cloudflared/config.yml` → 启动连接器并等待隧道就绪。
 
@@ -151,3 +151,12 @@ g++ -std=c++17 -Wall -Wextra -pedantic tools/deployer/tests/security_test.cpp to
 控制台仅接受 `127.0.0.1:<端口>`，修改操作要求浏览器同源 Origin；跨站调用以及自定义域名指向本机的请求会被拒绝。请求头和请求体各限制为 16 KiB，完整接收请求最多 5 秒。任务执行期间不能停止服务。部署参数及路径包含 shell 特殊字符时会明确拒绝。
 
 服务通过 Node.js `--env-file=.env` 读取配置，不把 APP_SECRET 放到 shell 命令中。已有 APP_SECRET 和其他配置会保留；已有密钥过短或配置无法写入时部署会中止。新密钥使用 Windows 系统安全随机数。
+
+### 隧道凭据回归检查（Linux / 无网络）
+
+```sh
+g++ -std=c++17 -Wall -Wextra -pedantic tools/deployer/tests/tunnel_test.cpp tools/deployer/src/cloudflare.cpp tools/deployer/src/json.cpp -o /tmp/deployer-tunnel-test
+/tmp/deployer-tunnel-test
+```
+
+HTTP、随机源和文件写入使用测试替身，验证发送给 API 的 secret 与落盘凭据一致、API 失败或无效 ID 不写文件，以及凭据写入失败不会报告成功。不会创建真实隧道或修改 DNS；完整 Windows 连接器启动仍需实测。

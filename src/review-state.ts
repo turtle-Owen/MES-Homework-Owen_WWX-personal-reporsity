@@ -3,6 +3,7 @@ export type ReviewQuestion = {
   number: number;
   prompt: string;
   score: number;
+  standard_answer?: string;
 };
 export type ReviewItem = {
   questionId: string;

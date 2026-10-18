@@ -26,6 +26,8 @@ import {
   safeParse,
 } from "./analysis.mjs";
 import readXlsxFile from "read-excel-file/node";
+import { createModelBudget, modelErrorStatus } from "./model-budget.mjs";
+import { teachingContent } from "./teaching-content.mjs";
 import {
   normalizeReview,
   publicPractice,
@@ -90,6 +92,16 @@ if (!mistakeColumns.some((column) => column.name === "practice_json"))
   db.exec("ALTER TABLE mistakes ADD COLUMN practice_json TEXT");
 if (!mistakeColumns.some((column) => column.name === "mastery"))
   db.exec("ALTER TABLE mistakes ADD COLUMN mastery INTEGER NOT NULL DEFAULT 0");
+if (
+  !db
+    .prepare("PRAGMA table_info(teaching_analyses)")
+    .all()
+    .some((column) => column.name === "source_revision")
+)
+  db.exec(
+    "ALTER TABLE teaching_analyses ADD COLUMN source_revision TEXT NOT NULL DEFAULT ''",
+  );
+const reserveModel = createModelBudget(db);
 const app = express();
 app.disable("x-powered-by");
 app.use(sameOriginWrites);
@@ -220,7 +232,7 @@ function providerFor(userId, { vision = false } = {}) {
   return { config, preset };
 }
 
-async function askModel(userId, prompt, images = []) {
+async function askModel(userId, prompt, images = [], reservation = null) {
   const { config } = providerFor(userId, { vision: images.length > 0 });
   const content = [{ type: "text", text: prompt }];
   images.forEach((image, index) => {
@@ -240,26 +252,32 @@ async function askModel(userId, prompt, images = []) {
     Object.hasOwn(providers, config.provider) && providers[config.provider];
   if (!preset) throw new Error("模型厂商无效");
   const endpoint = providerEndpoint(config.endpoint, preset);
-  const rr = await fetch(endpoint, {
-    redirect: "error",
-    signal: AbortSignal.timeout(60000),
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${decrypt(config.encrypted_key, config.iv)}`,
-    },
-    body: JSON.stringify({
-      model: config.model,
-      response_format: { type: "json_object" },
-      temperature: 0,
-      messages: [{ role: "user", content: images.length ? content : prompt }],
-    }),
-  });
-  if (!rr.ok) throw new Error(`模型接口请求失败 (${rr.status})`);
-  const raw = await rr.json();
-  const text = raw.choices?.[0]?.message?.content;
-  if (!text) throw new Error("模型没有返回识别内容");
-  return cleanModelJson(text);
+  const release = reservation || reserveModel(userId);
+  try {
+    release.renew();
+    const rr = await fetch(endpoint, {
+      redirect: "error",
+      signal: AbortSignal.timeout(60000),
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${decrypt(config.encrypted_key, config.iv)}`,
+      },
+      body: JSON.stringify({
+        model: config.model,
+        response_format: { type: "json_object" },
+        temperature: 0,
+        messages: [{ role: "user", content: images.length ? content : prompt }],
+      }),
+    });
+    if (!rr.ok) throw new Error(`模型接口请求失败 (${rr.status})`);
+    const raw = await rr.json();
+    const text = raw.choices?.[0]?.message?.content;
+    if (!text) throw new Error("模型没有返回识别内容");
+    return cleanModelJson(text);
+  } finally {
+    release();
+  }
 }
 
 function makeSchoolAndTeacher(x) {
@@ -352,54 +370,12 @@ app.post("/api/schools/register", (req, res) => {
     });
   }
 });
-app.post("/api/auth/register", (req, res) => {
-  try {
-    const x = req.body;
-    if (x.role !== "student")
-      return res.status(403).json({ error: "教师账户须由学校管理员创建" });
-    if (
-      !["teacher", "student"].includes(x.role) ||
-      !x.name ||
-      !x.email ||
-      !validPassword(x.password)
-    )
-      return res.status(400).json({ error: "请完整填写信息，密码至少 8 位" });
-    if (
-      !x.schoolCode ||
-      !["小学", "初中", "高中"].includes(x.stage) ||
-      !x.className
-    )
-      return res
-        .status(400)
-        .json({ error: "教师须填写学校注册码、学段、学科和班级" });
-    const school = db
-      .prepare("SELECT * FROM schools WHERE id=?")
-      .get(x.schoolCode);
-    if (!school) return res.status(400).json({ error: "学校邀请码无效" });
-    const id = uid(),
-      salt = randomBytes(16).toString("hex");
-    db.prepare(
-      "INSERT INTO users(id,school_id,role,name,email,password_hash,salt,stage,subject,class_name,created_at,is_school_admin) VALUES(?,?,?,?,?,?,?,?,?,?,?,0)",
-    ).run(
-      id,
-      school.id,
-      x.role,
-      x.name,
-      x.email.toLowerCase(),
-      pass(x.password, salt),
-      salt,
-      x.stage || null,
-      x.subject || null,
-      x.className || null,
-      iso(),
-    );
-    setSession(res, id);
-    res.json({ ok: true, schoolCode: school.id });
-  } catch (e) {
-    res.status(400).json({
-      error: String(e).includes("UNIQUE") ? "邮箱已注册" : "注册失败",
-    });
-  }
+// School IDs are identifiers, not enrollment credentials. Staff create students
+// through /api/students (or import), fixing their verified class on the server.
+app.post("/api/auth/register", (_req, res) => {
+  res
+    .status(403)
+    .json({ error: "学生账户须由学校管理员或教师创建，请联系学校领取账户" });
 });
 app.post("/api/auth/login", (req, res) => {
   if (
@@ -794,7 +770,9 @@ app.post(
         pageCount: word ? 1 : images.length,
       });
     } catch (error) {
-      res.status(502).json({ error: error.message || "作业解析失败" });
+      res
+        .status(modelErrorStatus(error))
+        .json({ error: error.message || "作业解析失败" });
     } finally {
       if (req.file?.path) fs.rmSync(req.file.path, { force: true });
     }
@@ -1045,9 +1023,12 @@ app.get("/api/submissions/:id", auth, (req, res) => {
     })),
     questions: db
       .prepare(
-        "SELECT id,number,prompt,score FROM questions WHERE assignment_id=? ORDER BY number",
+        "SELECT id,number,prompt,score,standard_answer FROM questions WHERE assignment_id=? ORDER BY number",
       )
-      .all(s.assignment_id),
+      .all(s.assignment_id)
+      .map(({ standard_answer, ...question }) =>
+        student ? question : { ...question, standard_answer },
+      ),
     analysis_json: analysis ? JSON.stringify(analysis) : null,
     ocr_text: visible ? s.ocr_text : null,
     analysis,
@@ -1064,10 +1045,15 @@ app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
   if (recognitionJobs.has(s.id))
     return res.status(409).json({ error: "识别正在进行中" });
   recognitionJobs.add(s.id);
+  let reservation;
+  let started = false;
   try {
+    providerFor(req.user.id);
+    reservation = reserveModel(req.user.id);
     db.prepare(
       "UPDATE submissions SET status='recognizing',teacher_reviewed=0,score=NULL WHERE id=?",
     ).run(s.id);
+    started = true;
     const qs = db
       .prepare(
         "SELECT q.*,k.title knowledge_title FROM questions q LEFT JOIN knowledge k ON k.id=q.knowledge_id WHERE assignment_id=? ORDER BY number",
@@ -1100,15 +1086,17 @@ app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
     }
     const documentText = texts.join("\n");
     const prompt = `学校作业 OCR、自动批改与个性化练习。学段=${s.stage}，学科=${s.subject}。\n教师已经录入的正式题目=${JSON.stringify(qs)}。\n${documentText ? `答卷文字（按附件顺序）：\n${documentText}\n` : "学生答卷页面已附在消息中。"}\n规则：1. 忠实识别学生实际填写内容；2. 只能按 questionId 对齐正式题目；3. 无法辨认写[无法辨认]且 confidence 低于0.5；4. 自动判断正误和得分；5. 错题必须生成分步解析、错误原因、订正答案，以及2道同知识点同题型但数值或情境不同的练习题；6. 每个正式题目恰好返回一项。\n只返回 JSON：{"ocrText":"完整识别原文","items":[{"questionId":"题目id","knowledgeId":"知识点id","studentAnswer":"学生答案","isCorrect":false,"score":0,"reason":"错误原因","correction":"正确答案","explanation":"分步题目解析","confidence":0.0,"practiceQuestions":[{"prompt":"同类题","answer":"答案","explanation":"解析"}]}]}`;
-    const parsed = await askModel(req.user.id, prompt, images);
+    const parsed = await askModel(req.user.id, prompt, images, reservation);
     db.prepare(
       "UPDATE submissions SET status='review',teacher_reviewed=0,score=NULL,ocr_text=?,analysis_json=? WHERE id=?",
     ).run(parsed.ocrText || "", JSON.stringify(parsed), s.id);
     res.json(parsed);
   } catch (e) {
-    db.prepare("UPDATE submissions SET status='failed' WHERE id=?").run(s.id);
-    res.status(502).json({ error: String(e.message || e) });
+    if (started)
+      db.prepare("UPDATE submissions SET status='failed' WHERE id=?").run(s.id);
+    res.status(modelErrorStatus(e)).json({ error: String(e.message || e) });
   } finally {
+    reservation?.();
     recognitionJobs.delete(s.id);
   }
 });
@@ -1222,7 +1210,9 @@ app.post("/api/mistakes/:id/practice/generate", auth, async (req, res) => {
         .json({ error: "题目或复核状态已变化，请刷新后重试" });
     res.json({ questions: publicPractice(questions) });
   } catch (error) {
-    res.status(502).json({ error: error.message || "练习生成失败" });
+    res
+      .status(modelErrorStatus(error))
+      .json({ error: error.message || "练习生成失败" });
   }
 });
 app.post("/api/mistakes/:id/practice/submit", auth, async (req, res) => {
@@ -1266,7 +1256,9 @@ app.post("/api/mistakes/:id/practice/submit", auth, async (req, res) => {
         .json({ error: "题目或复核状态已变化，请刷新后重试" });
     res.json(result);
   } catch (error) {
-    res.status(502).json({ error: error.message || "练习批改失败" });
+    res
+      .status(modelErrorStatus(error))
+      .json({ error: error.message || "练习批改失败" });
   }
 });
 app.post("/api/papers/generate", auth, teacher, (req, res) => {
@@ -1303,18 +1295,6 @@ app.get("/api/papers", auth, teacher, (req, res) =>
 
 /* ---------- v0.2.0 教学分析：把已复核错题换算成可讲评的课堂内容 ---------- */
 
-const analysisJson = (raw) => {
-  if (!raw) return null;
-  const text = String(raw).trim();
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const body = fenced ? fenced[1].trim() : text;
-  const start = body.indexOf("{");
-  const end = body.lastIndexOf("}");
-  return JSON.parse(
-    start >= 0 && end > start ? body.slice(start, end + 1) : body,
-  );
-};
-
 function loadTeachingStats(assignmentId, userId) {
   const user = db.prepare("SELECT * FROM users WHERE id=?").get(userId);
   const data = user?.is_school_admin
@@ -1324,25 +1304,118 @@ function loadTeachingStats(assignmentId, userId) {
   return buildAssignmentStats(data);
 }
 
+function teachingRevision(assignmentId) {
+  const assignment = db
+    .prepare("SELECT school_id,stage,subject FROM assignments WHERE id=?")
+    .get(assignmentId);
+  if (!assignment) return "";
+  const source = loadAssignmentData(db, {
+    schoolId: assignment.school_id,
+    assignmentId,
+  });
+  const labels = db
+    .prepare(
+      "SELECT id,title FROM knowledge WHERE school_id=? AND stage=? AND subject=? ORDER BY id",
+    )
+    .all(assignment.school_id, assignment.stage, assignment.subject);
+  return createHash("sha256")
+    .update(JSON.stringify({ source, labels }))
+    .digest("hex");
+}
+
+function ensureTeachingRevision(assignmentId, revision) {
+  if (teachingRevision(assignmentId) !== revision)
+    throw Object.assign(new Error("复核数据已变化，请刷新后重新生成分析"), {
+      status: 409,
+    });
+}
+
+// Read statistics and their revision from the same SQLite snapshot. Never hold
+// this transaction open across a provider request.
+function loadTeachingSnapshot(assignmentId, userId) {
+  db.exec("BEGIN");
+  try {
+    const stats = loadTeachingStats(assignmentId, userId);
+    const revision = stats ? teachingRevision(assignmentId) : "";
+    db.exec("COMMIT");
+    return { stats, revision };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function saveTeachingAnalysis({
+  assignmentId,
+  scope,
+  studentId,
+  user,
+  revision,
+  content,
+  stats,
+}) {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    ensureTeachingRevision(assignmentId, revision);
+    const model =
+      db
+        .prepare("SELECT model FROM provider_settings WHERE user_id=?")
+        .get(user.id)?.model || "";
+    const analysis = { id: uid(), model, created_at: iso(), content };
+    db.prepare(
+      "INSERT INTO teaching_analyses(id,assignment_id,scope,student_id,school_id,created_by,model,payload_json,stats_json,created_at,source_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+    ).run(
+      analysis.id,
+      assignmentId,
+      scope,
+      studentId,
+      user.school_id,
+      user.id,
+      model,
+      JSON.stringify(content),
+      JSON.stringify(stats),
+      analysis.created_at,
+      revision,
+    );
+    db.exec("COMMIT");
+    return analysis;
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 function latestAnalysis(assignmentId, scope, studentId, userId) {
   const row = db
     .prepare(
       `SELECT * FROM teaching_analyses
-       WHERE assignment_id=? AND scope=? AND created_by=?
+       WHERE assignment_id=? AND scope=? AND created_by=? AND source_revision=?
          AND ${studentId ? "student_id=?" : "student_id IS NULL"}
        ORDER BY created_at DESC LIMIT 1`,
     )
     .get(
       ...(studentId
-        ? [assignmentId, scope, userId, studentId]
-        : [assignmentId, scope, userId]),
+        ? [
+            assignmentId,
+            scope,
+            userId,
+            teachingRevision(assignmentId),
+            studentId,
+          ]
+        : [assignmentId, scope, userId, teachingRevision(assignmentId)]),
     );
   if (!row) return null;
+  let content;
+  try {
+    content = teachingContent(safeParse(row.payload_json, null), scope);
+  } catch {
+    return null; // Legacy malformed model output must not crash the client.
+  }
   return {
     id: row.id,
     model: row.model,
     created_at: row.created_at,
-    content: safeParse(row.payload_json, null),
+    content,
   };
 }
 
@@ -1398,9 +1471,9 @@ app.get("/api/teaching/assignments/:id", auth, schoolStaff, (req, res) => {
       .all(req.params.id),
     history: db
       .prepare(
-        "SELECT id,model,created_at FROM teaching_analyses WHERE assignment_id=? AND scope='class' AND created_by=? ORDER BY created_at DESC LIMIT 8",
+        "SELECT id,model,created_at FROM teaching_analyses WHERE assignment_id=? AND scope='class' AND created_by=? AND source_revision=? ORDER BY created_at DESC LIMIT 8",
       )
-      .all(req.params.id, req.user.id),
+      .all(req.params.id, req.user.id, teachingRevision(req.params.id)),
   });
 });
 
@@ -1409,7 +1482,10 @@ app.post(
   auth,
   teachingAuthor,
   async (req, res) => {
-    const stats = loadTeachingStats(req.params.id, req.user.id);
+    const { stats, revision } = loadTeachingSnapshot(
+      req.params.id,
+      req.user.id,
+    );
     if (!stats)
       return res.status(404).json({ error: "作业不存在或不属于你的账户" });
     if (!stats.overview.mistakeCount)
@@ -1434,39 +1510,24 @@ app.post(
 7. 课后作业只针对本次出错的知识点，题量少而准。
 只返回 JSON：{"brief":"两句话点出本次作业最要命的结论，包含具体比例或题号","keyFindings":[{"title":"结论标题","detail":"支撑这个结论的数据与判断","action":"教师下一步动作"}],"boardPlan":{"title":"讲评课主题","duration":"课时安排","goal":"本课目标","steps":[{"minutes":5,"title":"环节名称","teacher":"教师做什么","students":"学生做什么"}],"blackboard":["板书逐行内容"]},"questionReviews":[{"number":1,"knowledge":"知识点","whyWrong":"出错原因","explainToStudents":"讲给学生听的完整讲解","boardWork":"板书演示内容","quickCheck":"讲完立刻检查是否听懂的一个小问题","wrongStudents":["需要点名的学生"]}],"reasonInsights":[{"id":"错因id","label":"错因名称","diagnosis":"这个错因在本次作业里的真实表现","teachingMove":"课堂上一句话或一个动作怎么纠","followUp":"课后怎么巩固"}],"groups":[{"name":"分层名称","studentNames":["学生姓名"],"strategy":"这一层的辅导策略","materials":"需要准备的材料或题目"}],"homework":{"title":"作业名称","targets":["覆盖的知识点"],"items":[{"prompt":"题目","source":"来源题号","difficulty":"易/中/难","expectation":"期望学生达到的效果"}]},"teacherScript":"教师上课可以直接照读的讲评开场稿，150字以内"}`,
       );
-      const content = analysisJson(JSON.stringify(raw));
-      const id = uid();
-      const provider = db
-        .prepare("SELECT model FROM provider_settings WHERE user_id=?")
-        .get(req.user.id);
-      db.prepare(
-        "INSERT INTO teaching_analyses(id,assignment_id,scope,student_id,school_id,created_by,model,payload_json,stats_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-      ).run(
-        id,
-        req.params.id,
-        "class",
-        null,
-        req.user.school_id,
-        req.user.id,
-        provider?.model || "",
-        JSON.stringify(content),
-        JSON.stringify({
+      const content = teachingContent(raw, "class");
+      const analysis = saveTeachingAnalysis({
+        assignmentId: req.params.id,
+        scope: "class",
+        studentId: null,
+        user: req.user,
+        revision,
+        content,
+        stats: {
           overview: stats.overview,
           knowledgePoints: stats.knowledgePoints,
-        }),
-        iso(),
-      );
-      res.json({
-        analysis: {
-          id,
-          model: provider?.model || "",
-          created_at: iso(),
-          content,
         },
-        stats,
       });
+      res.json({ analysis, stats });
     } catch (error) {
-      res.status(502).json({ error: error.message || "教学分析生成失败" });
+      res
+        .status(modelErrorStatus(error))
+        .json({ error: error.message || "教学分析生成失败" });
     }
   },
 );
@@ -1476,7 +1537,10 @@ app.post(
   auth,
   teachingAuthor,
   async (req, res) => {
-    const stats = loadTeachingStats(req.params.id, req.user.id);
+    const { stats, revision } = loadTeachingSnapshot(
+      req.params.id,
+      req.user.id,
+    );
     if (!stats)
       return res.status(404).json({ error: "作业不存在或不属于你的账户" });
     if (!stats.overview.mistakeCount)
@@ -1497,13 +1561,16 @@ app.post(
 规则：1. 逐题给出最贴切的错因 id；2. 题号必须来自上面的明细，不要遗漏；3. 不要把“无法辨认”判成学生的知识性错误，这类题号可以不返回；4. 不编造不存在的题号；5. 只返回判断依据充分的题号，拿不准的题号不返回，系统会保留原来的关键词归因。
 只返回 JSON：{"reasonTypes":[{"id":"错因id","questionNumbers":[1,2],"evidence":"判断依据"}]}`,
       );
+      ensureTeachingRevision(req.params.id, revision);
       const distribution = mergeReasonTypes(
         stats.reasonDistribution,
         raw.reasonTypes,
       );
       res.json({ reasonDistribution: distribution });
     } catch (error) {
-      res.status(502).json({ error: error.message || "错因归因失败" });
+      res
+        .status(modelErrorStatus(error))
+        .json({ error: error.message || "错因归因失败" });
     }
   },
 );
@@ -1513,7 +1580,10 @@ app.post(
   auth,
   teachingAuthor,
   async (req, res) => {
-    const stats = loadTeachingStats(req.params.id, req.user.id);
+    const { stats, revision } = loadTeachingSnapshot(
+      req.params.id,
+      req.user.id,
+    );
     if (!stats)
       return res.status(404).json({ error: "作业不存在或不属于你的账户" });
     const student = buildStudentStats(stats, req.params.studentId);
@@ -1530,38 +1600,24 @@ app.post(
 要求：1. 只使用给定数据，不编造题目或分数；2. 指出知识漏洞时要说清是哪一个知识点、对应哪几题；3. 动作要具体到“今晚做什么、明天课堂做什么”；4. 语气对教师专业、对学生温和，不贴标签、不打击；5. 练习题要针对该生出错的知识点，给出参考答案要点。
 只返回 JSON：{"brief":"一句话说清这位学生这次的核心问题","diagnosis":"结合题号与知识点的具体诊断，150字以内","weakKnowledge":[{"title":"知识点","questionNumbers":[1,2],"evidence":"判断依据","mastery":"掌握程度描述"}],"causes":[{"label":"错因名称","detail":"这位学生的具体表现","fix":"怎么改"}],"actions":[{"when":"时间点","what":"具体动作","who":"老师做/学生做","check":"怎么检验做到了"}],"practice":[{"prompt":"针对性练习题","knowledge":"知识点","answer":"参考答案要点","difficulty":"易/中/难"}],"encouragement":"给这位学生的一句正向反馈","parentNote":"可以发给家长的一段简短说明"}`,
       );
-      const content = analysisJson(JSON.stringify(raw));
-      const id = uid();
-      const provider = db
-        .prepare("SELECT model FROM provider_settings WHERE user_id=?")
-        .get(req.user.id);
-      db.prepare(
-        "INSERT INTO teaching_analyses(id,assignment_id,scope,student_id,school_id,created_by,model,payload_json,stats_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-      ).run(
-        id,
-        req.params.id,
-        "student",
-        student.student.studentId || "",
-        req.user.school_id,
-        req.user.id,
-        provider?.model || "",
-        JSON.stringify(content),
-        JSON.stringify({
+      const content = teachingContent(raw, "student");
+      const analysis = saveTeachingAnalysis({
+        assignmentId: req.params.id,
+        scope: "student",
+        studentId: student.student.studentId || `name:${student.student.name}`,
+        user: req.user,
+        revision,
+        content,
+        stats: {
           student: student.student,
           knowledgePoints: student.knowledgePoints,
-        }),
-        iso(),
-      );
-      res.json({
-        analysis: {
-          id,
-          model: provider?.model || "",
-          created_at: iso(),
-          content,
         },
       });
+      res.json({ analysis });
     } catch (error) {
-      res.status(502).json({ error: error.message || "学生诊断生成失败" });
+      res
+        .status(modelErrorStatus(error))
+        .json({ error: error.message || "学生诊断生成失败" });
     }
   },
 );
@@ -1584,7 +1640,7 @@ app.get(
       analysis: latestAnalysis(
         req.params.id,
         "student",
-        student.student.studentId,
+        student.student.studentId || `name:${student.student.name}`,
         req.user.id,
       ),
     });

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   BarChart3,
@@ -39,6 +39,8 @@ import {
   refineReasonTypes,
   saveFocus,
 } from "./analysis-api";
+
+import { createTeachingScope } from "./teaching-state";
 
 type Notify = (message: string) => void;
 
@@ -140,11 +142,7 @@ function AiBlock({
 
 /* ----------------------------- 班级教学分析 ----------------------------- */
 
-export function TeachingAnalysis({
-  notify,
-}: {
-  notify: Notify;
-}) {
+export function TeachingAnalysis({ notify }: { notify: Notify }) {
   const [assignments, setAssignments] = useState<TeachingAssignment[]>([]);
   const [selected, setSelected] = useState("");
   const [stats, setStats] = useState<TeachingStats | null>(null);
@@ -157,19 +155,44 @@ export function TeachingAnalysis({
   const [picked, setPicked] = useState<number[]>([]);
   const [student, setStudent] = useState<StudentEntry | null>(null);
 
+  const scope = useRef(createTeachingScope()).current;
+  const chooseAssignment = (id: string) => {
+    scope.select(id);
+    setSelected(id);
+    setStats(null);
+    setAnalysis(null);
+    setFocus([]);
+    setPicked([]);
+    setOpenQuestion(null);
+    setStudent(null);
+    setAnalyzing(false);
+    setRefining(false);
+    setLoading(!!id);
+  };
+
   useEffect(() => {
+    let active = true;
     listTeachingAssignments()
       .then((rows) => {
+        if (!active) return;
         setAssignments(rows);
-        setSelected((current) => current || rows[0]?.id || "");
+        chooseAssignment(rows[0]?.id || "");
       })
-      .catch((error) => notify((error as Error).message));
+      .catch((error) => {
+        if (active) notify((error as Error).message);
+      });
+    return () => {
+      active = false;
+      scope.select("");
+    };
   }, []);
 
   const reload = (id: string) => {
+    const ticket = scope.start("load");
     setLoading(true);
     return loadTeachingAnalysis(id)
       .then((data) => {
+        if (!scope.isCurrent(ticket)) return;
         setStats(data.stats);
         setAnalysis(data.analysis);
         setFocus(data.focus || []);
@@ -177,11 +200,14 @@ export function TeachingAnalysis({
         setOpenQuestion(data.stats.highFrequencyQuestions[0]?.number ?? null);
       })
       .catch((error) => {
+        if (!scope.isCurrent(ticket)) return;
         setStats(null);
         setAnalysis(null);
         notify((error as Error).message);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (scope.isCurrent(ticket)) setLoading(false);
+      });
   };
 
   useEffect(() => {
@@ -189,38 +215,54 @@ export function TeachingAnalysis({
   }, [selected]);
 
   const runAnalysis = async () => {
-    if (!selected) return;
+    if (!selected || loading) return;
+    const ticket = scope.start("analysis");
     setAnalyzing(true);
     try {
       const result = await generateClassAnalysis(selected);
+      if (!scope.isCurrent(ticket)) return;
       setAnalysis(result.analysis);
       setStats(result.stats);
       notify("AI 教学方案已生成，可直接用于课堂讲评。");
-      listTeachingAssignments().then(setAssignments).catch(() => {});
+      listTeachingAssignments()
+        .then((rows) => {
+          if (scope.isCurrent(ticket)) setAssignments(rows);
+        })
+        .catch(() => {});
     } catch (error) {
-      notify((error as Error).message);
+      if (scope.isCurrent(ticket)) notify((error as Error).message);
     } finally {
-      setAnalyzing(false);
+      if (scope.isCurrent(ticket)) setAnalyzing(false);
     }
   };
 
   const runRefine = async () => {
-    if (!selected || !stats) return;
+    if (!selected || !stats || stats.assignment.id !== selected || loading)
+      return;
+    const ticket = scope.start("refine");
     setRefining(true);
     try {
       const result = await refineReasonTypes(selected);
-      setStats({ ...stats, reasonDistribution: result.reasonDistribution });
+      if (!scope.isCurrent(ticket)) return;
+      setStats((current) =>
+        current
+          ? { ...current, reasonDistribution: result.reasonDistribution }
+          : current,
+      );
       notify("已用 AI 重新归因，错因统计已更新。");
     } catch (error) {
-      notify((error as Error).message);
+      if (scope.isCurrent(ticket)) notify((error as Error).message);
     } finally {
-      setRefining(false);
+      if (scope.isCurrent(ticket)) setRefining(false);
     }
   };
 
   const setFocusLevel = async (studentId: string, level: string) => {
+    if (!stats || stats.assignment.id !== selected || loading) return;
+    const ticket = scope.start(`focus:${studentId}`);
     try {
       const result = await saveFocus(selected, studentId, { level });
+      if (!scope.isCurrent(ticket)) return;
       setFocus((current) => {
         const rest = current.filter((item) => item.student_id !== studentId);
         if (!result.level) return rest;
@@ -236,7 +278,7 @@ export function TeachingAnalysis({
       });
       notify(result.level ? "已更新跟进名单。" : "已从跟进名单移除。");
     } catch (error) {
-      notify((error as Error).message);
+      if (scope.isCurrent(ticket)) notify((error as Error).message);
     }
   };
 
@@ -248,6 +290,8 @@ export function TeachingAnalysis({
     );
 
   const reAssign = async () => {
+    if (!stats || stats.assignment.id !== selected || loading) return;
+    const ticket = scope.start("reassign");
     const numbers = picked.length
       ? picked
       : (stats?.highFrequencyQuestions || [])
@@ -256,12 +300,17 @@ export function TeachingAnalysis({
     if (!numbers.length) return notify("没有可重新布置的错题。");
     try {
       const result = await mistakesToAssignment(selected, { numbers });
+      if (!scope.isCurrent(ticket)) return;
       notify(
         `已生成新的重练作业《${result.title}》，覆盖 ${result.knowledgePoints.length} 个知识点。`,
       );
-      listTeachingAssignments().then(setAssignments).catch(() => {});
+      listTeachingAssignments()
+        .then((rows) => {
+          if (scope.isCurrent(ticket)) setAssignments(rows);
+        })
+        .catch(() => {});
     } catch (error) {
-      notify((error as Error).message);
+      if (scope.isCurrent(ticket)) notify((error as Error).message);
     }
   };
 
@@ -285,7 +334,10 @@ export function TeachingAnalysis({
         <div className="ta-head-actions">
           <label className="field">
             <span>选择作业</span>
-            <select value={selected} onChange={(e) => setSelected(e.target.value)}>
+            <select
+              value={selected}
+              onChange={(e) => chooseAssignment(e.target.value)}
+            >
               <option value="">请选择一份已复核作业</option>
               {assignments.map((item) => (
                 <option key={item.id} value={item.id}>
@@ -294,7 +346,10 @@ export function TeachingAnalysis({
               ))}
             </select>
           </label>
-          <Button disabled={!selected || analyzing} onClick={runAnalysis}>
+          <Button
+            disabled={!selected || loading || analyzing}
+            onClick={runAnalysis}
+          >
             <Sparkles />
             {analyzing ? "AI 正在分析…" : "生成 AI 教学方案"}
           </Button>
@@ -322,8 +377,8 @@ export function TeachingAnalysis({
           <div className="rc4-empty">
             <ScanEye />
             <p>
-              《{stats.assignment.title}》暂无已复核错题。先到“识别与复核”完成 OCR
-              与教师复核，这里会自动生成班级学情统计。
+              《{stats.assignment.title}》暂无已复核错题。先到“识别与复核”完成
+              OCR 与教师复核，这里会自动生成班级学情统计。
             </p>
           </div>
         </section>
@@ -433,19 +488,21 @@ export function TeachingAnalysis({
 
             {analysis?.content?.keyFindings?.length ? (
               <div className="ta-findings">
-                {analysis.content.keyFindings.map((item: any, index: number) => (
-                  <div key={index}>
-                    <b>{String(index + 1).padStart(2, "0")}</b>
-                    <strong>{item.title}</strong>
-                    <p>{item.detail}</p>
-                    {item.action && (
-                      <span>
-                        <CheckCircle2 size={14} />
-                        {item.action}
-                      </span>
-                    )}
-                  </div>
-                ))}
+                {analysis.content.keyFindings.map(
+                  (item: any, index: number) => (
+                    <div key={index}>
+                      <b>{String(index + 1).padStart(2, "0")}</b>
+                      <strong>{item.title}</strong>
+                      <p>{item.detail}</p>
+                      {item.action && (
+                        <span>
+                          <CheckCircle2 size={14} />
+                          {item.action}
+                        </span>
+                      )}
+                    </div>
+                  ),
+                )}
               </div>
             ) : null}
 
@@ -471,9 +528,7 @@ export function TeachingAnalysis({
                     label={
                       <strong title={point.title}>
                         {point.title}
-                        <small>
-                          第 {point.questionNumbers.join("、")} 题
-                        </small>
+                        <small>第 {point.questionNumbers.join("、")} 题</small>
                       </strong>
                     }
                     right={
@@ -489,7 +544,8 @@ export function TeachingAnalysis({
               </div>
               {stats.knowledgePoints.length > 10 && (
                 <p className="ta-more">
-                  还有 {stats.knowledgePoints.length - 10} 个知识点掌握良好，未在此列出。
+                  还有 {stats.knowledgePoints.length - 10}{" "}
+                  个知识点掌握良好，未在此列出。
                 </p>
               )}
             </Section>
@@ -589,11 +645,14 @@ export function TeachingAnalysis({
                         <div>
                           <strong>第 {question.number} 题</strong>
                           <small>
-                            {question.knowledgeTitle} · {question.students.length}{" "}
-                            人出错（{percent(question.errorRate)}）
+                            {question.knowledgeTitle} ·{" "}
+                            {question.students.length} 人出错（
+                            {percent(question.errorRate)}）
                           </small>
                         </div>
-                        <span className={`ta-chip ${rateTone(1 - question.errorRate)}`}>
+                        <span
+                          className={`ta-chip ${rateTone(1 - question.errorRate)}`}
+                        >
                           {question.reasons.length
                             ? question.reasons[0]
                             : "错因待补充"}
@@ -610,7 +669,10 @@ export function TeachingAnalysis({
                           </div>
                           <div>
                             <b>参考答案</b>
-                            <p>{question.corrections[0] || question.standardAnswer}</p>
+                            <p>
+                              {question.corrections[0] ||
+                                question.standardAnswer}
+                            </p>
                           </div>
                         </div>
                         {question.explanations.length > 0 && (
@@ -641,7 +703,8 @@ export function TeachingAnalysis({
                           </div>
                         ) : (
                           <p className="ta-hint">
-                            生成 AI 教学方案后，这里会出现可直接照读的讲解与板书演示。
+                            生成 AI
+                            教学方案后，这里会出现可直接照读的讲解与板书演示。
                           </p>
                         )}
                         {question.practice.length > 0 && (
@@ -751,7 +814,9 @@ export function TeachingAnalysis({
                             <CheckCircle2 size={14} />
                             {item.teachingMove}
                           </span>
-                          {item.followUp && <small>课后：{item.followUp}</small>}
+                          {item.followUp && (
+                            <small>课后：{item.followUp}</small>
+                          )}
                         </div>
                       ),
                     )}
@@ -765,17 +830,21 @@ export function TeachingAnalysis({
                   desc="按学生实际出错情况分层，给出可直接执行的辅导策略。"
                 >
                   <div className="ta-groups">
-                    {analysis.content.groups.map((group: any, index: number) => (
-                      <div key={index}>
-                        <div>
-                          <GraduationCap size={16} />
-                          <strong>{group.name}</strong>
-                          <span>{(group.studentNames || []).join("、")}</span>
+                    {analysis.content.groups.map(
+                      (group: any, index: number) => (
+                        <div key={index}>
+                          <div>
+                            <GraduationCap size={16} />
+                            <strong>{group.name}</strong>
+                            <span>{(group.studentNames || []).join("、")}</span>
+                          </div>
+                          <p>{group.strategy}</p>
+                          {group.materials && (
+                            <small>准备：{group.materials}</small>
+                          )}
                         </div>
-                        <p>{group.strategy}</p>
-                        {group.materials && <small>准备：{group.materials}</small>}
-                      </div>
-                    ))}
+                      ),
+                    )}
                   </div>
                 </Section>
               ) : null}
@@ -796,9 +865,11 @@ export function TeachingAnalysis({
             >
               {analysis.content.homework.targets?.length ? (
                 <div className="ta-targets">
-                  {analysis.content.homework.targets.map((target: string, i: number) => (
-                    <span key={i}>{target}</span>
-                  ))}
+                  {analysis.content.homework.targets.map(
+                    (target: string, i: number) => (
+                      <span key={i}>{target}</span>
+                    ),
+                  )}
                 </div>
               ) : null}
               <ol className="ta-homework">
@@ -819,12 +890,15 @@ export function TeachingAnalysis({
             </Section>
           )}
 
-          {stats.reasonDistribution.some((item) => item.id === "unreadable") && (
+          {stats.reasonDistribution.some(
+            (item) => item.id === "unreadable",
+          ) && (
             <div className="ta-alert">
               <AlertCircle size={18} />
               <div>
                 <strong>
-                  有 {overview.unreadableCount} 道题因卷面/扫描无法辨认，未计入错因统计
+                  有 {overview.unreadableCount}{" "}
+                  道题因卷面/扫描无法辨认，未计入错因统计
                 </strong>
                 <p>
                   这些题不能作为学生掌握情况的依据。建议重新上传更清晰的答卷，
@@ -851,8 +925,9 @@ export function TeachingAnalysis({
                           {item.name}
                           {mark && (
                             <em className={`ta-mark ${mark.level}`}>
-                              {focusLevels.find((level) => level.id === mark.level)
-                                ?.label || mark.level}
+                              {focusLevels.find(
+                                (level) => level.id === mark.level,
+                              )?.label || mark.level}
                             </em>
                           )}
                         </strong>
@@ -890,7 +965,9 @@ export function TeachingAnalysis({
                             <button
                               key={level.id}
                               title={level.hint}
-                              className={mark?.level === level.id ? "active" : ""}
+                              className={
+                                mark?.level === level.id ? "active" : ""
+                              }
                               onClick={() =>
                                 setFocusLevel(
                                   item.studentId || item.name,
@@ -940,7 +1017,9 @@ export function TeachingAnalysis({
                       <div className="ta-library-item" key={index}>
                         <strong>{practice.prompt}</strong>
                         <small>答案：{practice.answer}</small>
-                        {practice.explanation && <small>{practice.explanation}</small>}
+                        {practice.explanation && (
+                          <small>{practice.explanation}</small>
+                        )}
                       </div>
                     ))}
                   </details>
@@ -953,11 +1032,10 @@ export function TeachingAnalysis({
 
       {student && stats && (
         <StudentAnalysisPanel
+          key={`${stats.assignment.id}:${student.studentId}`}
           assignmentId={stats.assignment.id}
           student={student}
-          rating={
-            focusMap.get(student.studentId)?.level || null
-          }
+          rating={focusMap.get(student.studentId)?.level || null}
           notify={notify}
           onClose={() => setStudent(null)}
         />
@@ -984,6 +1062,7 @@ function StudentAnalysisPanel({
   const [detail, setDetail] = useState<StudentDetail | null>(null);
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const scope = useRef(createTeachingScope()).current;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -994,28 +1073,43 @@ function StudentAnalysisPanel({
   }, []);
 
   useEffect(() => {
+    scope.select(`${assignmentId}:${student.studentId}`);
+    const ticket = scope.start("detail");
+    setDetail(null);
     setBusy(true);
     loadStudentAnalysis(assignmentId, student.studentId || student.name)
-      .then(setDetail)
-      .catch((error) => notify((error as Error).message))
-      .finally(() => setBusy(false));
+      .then((result) => {
+        if (scope.isCurrent(ticket)) setDetail(result);
+      })
+      .catch((error) => {
+        if (scope.isCurrent(ticket)) notify((error as Error).message);
+      })
+      .finally(() => {
+        if (scope.isCurrent(ticket)) setBusy(false);
+      });
+    return () => {
+      scope.select("");
+    };
   }, [assignmentId, student.studentId]);
 
   const run = async () => {
+    if (busy || !detail) return;
+    const ticket = scope.start("analysis");
     setGenerating(true);
     try {
       const result = await generateStudentAnalysis(
         assignmentId,
         student.studentId || student.name,
       );
+      if (!scope.isCurrent(ticket)) return;
       setDetail((current) =>
         current ? { ...current, analysis: result.analysis } : current,
       );
       notify(`${student.name} 的个别化诊断已生成。`);
     } catch (error) {
-      notify((error as Error).message);
+      if (scope.isCurrent(ticket)) notify((error as Error).message);
     } finally {
-      setGenerating(false);
+      if (scope.isCurrent(ticket)) setGenerating(false);
     }
   };
 
@@ -1036,9 +1130,11 @@ function StudentAnalysisPanel({
               )}
             </h2>
             <p>
-              错题 {student.mistakeCount} 道 · 涉及 {student.knowledgeTitles.length}{" "}
-              个知识点
-              {student.missingWork > 0 ? ` · 其中空答 ${student.missingWork} 道` : ""}
+              错题 {student.mistakeCount} 道 · 涉及{" "}
+              {student.knowledgeTitles.length} 个知识点
+              {student.missingWork > 0
+                ? ` · 其中空答 ${student.missingWork} 道`
+                : ""}
             </p>
           </div>
           <button className="ta-close" onClick={onClose} aria-label="关闭">
@@ -1132,7 +1228,8 @@ function StudentAnalysisPanel({
                   <Sparkles size={20} />
                   <strong>还没有个别化诊断</strong>
                   <p>
-                    AI 会结合这位学生的错题、知识点和错因，给出课堂与课后的补强动作。
+                    AI
+                    会结合这位学生的错题、知识点和错因，给出课堂与课后的补强动作。
                   </p>
                   <Button disabled={generating} onClick={run}>
                     <Sparkles />
@@ -1165,11 +1262,12 @@ function StudentAnalysisPanel({
                 {detail.questions.map((question) => (
                   <div className="ta-mini-question" key={question.id}>
                     <strong>
-                      第 {question.number} 题
-                      <em>{question.knowledgeTitle}</em>
+                      第 {question.number} 题<em>{question.knowledgeTitle}</em>
                     </strong>
                     <p>{question.prompt}</p>
-                    {question.reasons[0] && <small>错因：{question.reasons[0]}</small>}
+                    {question.reasons[0] && (
+                      <small>错因：{question.reasons[0]}</small>
+                    )}
                   </div>
                 ))}
               </div>
@@ -1237,7 +1335,8 @@ function downloadMarkdown(stats: TeachingStats, content: ClassAnalysis) {
   }
   if (content.boardPlan) {
     lines.push(`## 讲评课：${content.boardPlan.title || "课堂讲评"}`);
-    if (content.boardPlan.duration) lines.push(`课时：${content.boardPlan.duration}`);
+    if (content.boardPlan.duration)
+      lines.push(`课时：${content.boardPlan.duration}`);
     if (content.boardPlan.goal) lines.push(`目标：${content.boardPlan.goal}`);
     lines.push("");
     (content.boardPlan.steps || []).forEach((step) =>

@@ -1,6 +1,7 @@
 #include "cloudflare.h"
 
 #include "util.h"
+#include "security.h"
 
 namespace sc {
 namespace cf {
@@ -43,6 +44,53 @@ Result parseResponse(const HttpResponse &response, const std::string &action) {
   return result;
 }
 }  // namespace
+
+bool registeredTunnel(const std::string &log) {
+  return log.find("Registered tunnel connection") != std::string::npos ||
+         log.find("Connection registered") != std::string::npos;
+}
+
+Result createLocalTunnel(const std::string &apiToken, const std::string &accountId,
+                         const std::string &credentialsFile) {
+  Result failure;
+  if (accountId.empty() || !security::domain(accountId)) {
+    failure.message = "无法确定有效的 Cloudflare 账户 ID";
+    return failure;
+  }
+  // 64 random hex characters encode 256 bits of entropy. Cloudflare requires
+  // a base64-encoded secret containing at least 32 bytes; these decode to 64.
+  const std::string random = randomHex(32);
+  const char *alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string secret;
+  for (size_t i = 0; i < random.size(); i += 3) {
+    const unsigned a = (unsigned char)random[i];
+    const unsigned b = i + 1 < random.size() ? (unsigned char)random[i + 1] : 0;
+    const unsigned c = i + 2 < random.size() ? (unsigned char)random[i + 2] : 0;
+    secret += alphabet[a >> 2];
+    secret += alphabet[((a & 3) << 4) | (b >> 4)];
+    secret += i + 1 < random.size() ? alphabet[((b & 15) << 2) | (c >> 6)] : '=';
+    secret += i + 2 < random.size() ? alphabet[c & 63] : '=';
+  }
+  const std::string body = "{\"name\":\"smart-campus-homework\",\"config_src\":\"local\","
+                           "\"tunnel_secret\":\"" + secret + "\"}";
+  Result created = parseResponse(httpPostJson(std::string(kApi) + "/accounts/" +
+      accountId + "/cfd_tunnel", body, authHeaders(apiToken)), "创建命名隧道");
+  if (!created.ok) return created;
+  const std::string tunnelId = created.data["id"].toStringOr("");
+  if (tunnelId.empty() || !security::domain(tunnelId)) {
+    failure.message = "Cloudflare 返回的隧道 ID 无效";
+    return failure;
+  }
+  const std::string credentials = "{\"AccountTag\":\"" + jsonEscape(accountId) +
+      "\",\"TunnelSecret\":\"" + secret + "\",\"TunnelID\":\"" + jsonEscape(tunnelId) + "\"}\n";
+  if (!writeFileUtf8(credentialsFile, credentials)) {
+    failure.message = "隧道已创建（ID " + tunnelId +
+        "），但凭据保存失败；已停止部署且未修改 DNS。请在 Cloudflare 删除此未使用隧道后重试";
+    return failure;
+  }
+  created.message = "命名隧道及本地凭据已创建（ID " + tunnelId + "）";
+  return created;
+}
 
 Result verifyToken(const std::string &apiToken, std::string &outAccountId) {
   Result result;

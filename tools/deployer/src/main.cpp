@@ -45,7 +45,7 @@ void printHelp() {
 
 选项
   --domain <域名>         自定义域名，例如 homework.example.com
-  --api-token <令牌>      Cloudflare API Token（写 DNS 记录，需 Zone:DNS:Edit 权限）
+  --api-token <令牌>      Cloudflare API Token（写 DNS 记录，需 DNS:Edit、Zone:Read；创建隧道另需 Tunnel:Edit、账户读取）
   --tunnel-token <令牌>   命名隧道的连接器令牌（已有隧道时使用）
   --tunnel-id <ID>        已有隧道 ID（可选，与凭证文件配合）
   --port <端口>           服务端口，默认 8787

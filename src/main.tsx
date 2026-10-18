@@ -177,7 +177,7 @@ function App() {
             <ShieldCheck />
             <div>
               <strong>学校空间</strong>
-              <small>注册码 {user.school_id.slice(0, 8)}…</small>
+              <small>学校编号 {user.school_id.slice(0, 8)}…</small>
             </div>
           </div>
           <nav>
@@ -312,8 +312,7 @@ function Empty({ text }: { text: string }) {
   );
 }
 function Auth({ onDone }: { onDone: () => void }) {
-  const [mode, setMode] = useState<"login" | "register" | "school">("login"),
-    [role] = useState("student"),
+  const [mode, setMode] = useState<"login" | "school">("login"),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
   const submit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -324,7 +323,7 @@ function Auth({ onDone }: { onDone: () => void }) {
     try {
       await api(
         mode === "school" ? "/schools/register" : `/auth/${mode}`,
-        json("POST", { ...data, role }),
+        json("POST", data),
       );
       onDone();
     } catch (err) {
@@ -368,27 +367,17 @@ function Auth({ onDone }: { onDone: () => void }) {
         <form className="auth-form" onSubmit={submit}>
           <div>
             <span className="eyebrow">
-              {mode === "login"
-                ? "WELCOME BACK"
-                : mode === "school"
-                  ? "REGISTER SCHOOL"
-                  : "CREATE ACCOUNT"}
+              {mode === "login" ? "WELCOME BACK" : "REGISTER SCHOOL"}
             </span>
-            <h2>
-              {mode === "login"
-                ? "登录工作空间"
-                : mode === "school"
-                  ? "注册学校"
-                  : "加入学校"}
-            </h2>
+            <h2>{mode === "login" ? "登录工作空间" : "注册学校"}</h2>
             <p>
               {mode === "school"
                 ? "创建学校空间与首位教师管理员账户。"
                 : "使用学校账户安全访问数据。"}
             </p>
           </div>
-          {mode === "register" && (
-            <p>学生可凭学校注册码注册。教师账户请联系学校管理员创建。</p>
+          {mode === "login" && (
+            <p>教师和学生请联系学校领取账户，学段与班级由学校确认。</p>
           )}
           {mode !== "login" && (
             <Field
@@ -400,14 +389,6 @@ function Auth({ onDone }: { onDone: () => void }) {
           {mode === "school" && (
             <Field name="schoolName" label="学校名称" required />
           )}
-          {mode === "register" && (
-            <Field
-              name="schoolCode"
-              label="学校注册码"
-              required
-              placeholder="由学校管理员提供"
-            />
-          )}
           <Field name="email" label="邮箱" required type="email" />
           <Field
             name="password"
@@ -417,37 +398,20 @@ function Auth({ onDone }: { onDone: () => void }) {
             minLength={8}
             placeholder="至少 8 位"
           />
-          {mode === "register" && (
-            <>
-              <div className="field-row">
-                <Select name="stage" label="学段" options={stages} />
-                {role === "teacher" && (
-                  <Field name="subject" label="任教学科" required />
-                )}
-              </div>
-              <Field name="className" label="默认班级" required />
-            </>
-          )}
           {error && <p className="form-error">{error}</p>}
           <Button disabled={busy} className="full">
-            {busy
-              ? "正在处理…"
-              : mode === "login"
-                ? "登录"
-                : mode === "school"
-                  ? "注册学校并进入"
-                  : "注册并加入"}
+            {busy ? "正在处理…" : mode === "login" ? "登录" : "注册学校并进入"}
           </Button>
           <div className="auth-links">
             <button
               type="button"
               className="switch-auth"
               onClick={() => {
-                setMode(mode === "login" ? "register" : "login");
+                setMode("login");
                 setError("");
               }}
             >
-              {mode === "login" ? "教师或学生加入学校" : "已有账户？返回登录"}
+              已有账户？返回登录
             </button>
             <button
               type="button"
@@ -504,7 +468,7 @@ function SchoolDashboard({
       <Title
         eyebrow="SCHOOL ADMINISTRATION"
         title={summary?.school?.name || "学校仪表盘"}
-        desc={`学校账户只管理组织与成员，不设置班级、学段或学科。注册码：${user.school_id}`}
+        desc={`学校账户只管理组织与成员，不设置班级、学段或学科。学校编号：${user.school_id}`}
       />
       <div className="metric-grid">
         {[
@@ -1053,7 +1017,7 @@ function StudentsPage({
       <Title
         eyebrow="STUDENT ACCOUNTS"
         title="学生管理"
-        desc={`学校注册码：${user.school_id}。支持单个注册与 CSV/XLSX 批量导入。`}
+        desc={`学校编号：${user.school_id}。支持单个注册与 CSV/XLSX 批量导入。`}
       />
       <div className="two-col">
         <form className="rc4-panel" onSubmit={register}>
@@ -1332,6 +1296,23 @@ function Review({ notify }: { notify: (s: string) => void }) {
                   </Button>
                 )}
               </div>
+              {detail.files?.length > 0 && (
+                <div className="field">
+                  <span>答卷原件（按上传顺序）</span>
+                  {detail.files.map(
+                    (file: { name: string; url: string }, index: number) => (
+                      <a
+                        key={file.url}
+                        href={file.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        第 {index + 1} 个附件：{file.name}
+                      </a>
+                    ),
+                  )}
+                </div>
+              )}
               {detail.ocr_text && (
                 <label className="field">
                   <span>OCR 原文</span>
@@ -1356,6 +1337,9 @@ function Review({ notify }: { notify: (s: string) => void }) {
                     </span>
                   </div>
                   <p>{question.prompt}</p>
+                  {question.standard_answer && (
+                    <p>教师标准答案：{question.standard_answer}</p>
+                  )}
                   <label>
                     学生答案
                     <textarea
@@ -1823,7 +1807,7 @@ function AccountSettings({
             </>
           )}
           <div className="readonly">
-            <span>学校注册码</span>
+            <span>学校编号</span>
             <code>{user.school_id}</code>
           </div>
           <Button className="full">保存设置</Button>

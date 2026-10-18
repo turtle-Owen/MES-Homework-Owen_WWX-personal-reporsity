@@ -256,6 +256,7 @@ bool writeFileUtf8(const std::string &utf8Path, const std::string &content) {
   std::ofstream file(utf8ToWide(utf8Path).c_str(), std::ios::binary | std::ios::trunc);
   if (!file) return false;
   file.write(content.data(), (std::streamsize)content.size());
+  file.close();  // Include buffered-write/close errors before reporting persistence.
   return file.good();
 }
 
