@@ -136,6 +136,7 @@ struct Args {
   std::string dir;           // 部署目录（默认：exe 同级目录）
   std::string repo;          // 源码仓库地址
   int port = 8787;
+  bool noBrowser = false;    // 无桌面环境下仅启动控制台
   bool web = false;          // 打开 Web 部署控制台
   int webPort = 8899;
   bool yes = false;          // 跳过交互确认

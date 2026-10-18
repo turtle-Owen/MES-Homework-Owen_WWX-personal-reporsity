@@ -186,3 +186,9 @@ npx wrangler deploy
 教学分析切换作业会立即清空旧内容并忽略过期响应。生成方案和个体诊断绑定当时的复核数据版本；改判后旧方案不再作为当前结果展示，生成期间数据变化返回 409，请刷新后重新生成。历史未带版本的报告保留在数据库，需要重新生成后才能展示；历史异常模型 JSON 不再导致页面崩溃。教师复核界面提供受权限保护的原件下载与标准答案，学生接口仍隐藏标准答案。
 
 Windows 自定义域名部署会保存与新建隧道匹配的本地凭据，凭据保存失败时在修改 DNS 前中止。公网模式会重新检查 cloudflared；连接超时不再显示成功。构建缓存纳入依赖锁文件、公共文件及配置，日志按游标增量获取并限制页面记录数。完整 Windows 安装与浏览器视觉验证仍需目标环境执行。
+
+### 云端平台验证
+
+`.github/workflows/cloud-validation.yml` 在 PR 更新和 main 推送时运行，使用只读仓库权限，不需要模型或 Cloudflare 凭据。Ubuntu job 运行后端回归、生产构建和六项 Chromium 实际界面测试；Windows job 用 MSVC 编译真实部署器、运行四组 CTest 并启动 exe 检查 CLI 与本机 HTTP 安全边界。Windows smoke 不执行依赖安装、实际应用部署或 DNS 修改。
+
+浏览器数据由 `tests/browser/server.mjs` 在系统临时目录中创建，模型调用在该测试进程内全部拦截；不会读取真实运行数据。开发环境可执行 `npm run build`、`npx playwright install --with-deps chromium`、`npm run test:browser`。浏览器截图、失败录像/trace 与 Windows exe/CTest 日志作为 Actions artifacts 保留 7 天；这些产物仅含合成夹具。请以实际 Actions 运行结果为准，工作流配置本身不代表验证已经通过。

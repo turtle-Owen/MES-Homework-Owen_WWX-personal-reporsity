@@ -692,6 +692,7 @@ Args parseArgs(int argc, char **argv) {
   args.dir = args.get("dir");
   args.repo = args.get("repo");
   args.web = isTrue(args.get("web"));
+  args.noBrowser = isTrue(args.get("no-browser"));
   args.yes = isTrue(args.get("yes"));
   args.verbose = isTrue(args.get("verbose"));
   args.help = isTrue(args.get("help"));
