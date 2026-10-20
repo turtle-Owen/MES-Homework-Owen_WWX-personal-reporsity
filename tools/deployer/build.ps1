@@ -29,9 +29,14 @@ $ninja = Get-Command ninja -ErrorAction SilentlyContinue
 $gpp = Get-Command g++ -ErrorAction SilentlyContinue
 
 if ($cmake) {
-  $generator = if ($ninja) { "Ninja" } else { "MinGW Makefiles" }
-  Write-Host "使用 CMake（$generator）构建…" -ForegroundColor Gray
-  & $cmake.Source -S $here -B $buildDir -G $generator -DCMAKE_BUILD_TYPE=$Configuration
+  # Let CMake discover Visual Studio when no MinGW compiler is present.
+  $configureArgs = @('-S', $here, '-B', $buildDir, "-DCMAKE_BUILD_TYPE=$Configuration")
+  if ($gpp) {
+    $generator = if ($ninja) { "Ninja" } else { "MinGW Makefiles" }
+    $configureArgs += @('-G', $generator, "-DCMAKE_CXX_COMPILER=$($gpp.Source)")
+  }
+  Write-Host "使用 CMake 构建…" -ForegroundColor Gray
+  & $cmake.Source @configureArgs
   if ($LASTEXITCODE -ne 0) { throw "CMake 配置失败" }
   & $cmake.Source --build $buildDir --config $Configuration
   if ($LASTEXITCODE -ne 0) { throw "编译失败" }
@@ -40,7 +45,7 @@ if ($cmake) {
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
   $sources = Get-ChildItem (Join-Path $here "src") -Filter *.cpp | ForEach-Object { $_.FullName }
   & $gpp.Source -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter `
-    -static -static-libgcc -static-libstdc++ `
+    -DNOMINMAX -DWIN32_LEAN_AND_MEAN -static -static-libgcc -static-libstdc++ `
     -o (Join-Path $outDir "campus-deploy.exe") `
     @sources `
     -lws2_32 -liphlpapi -lshell32 -lbcrypt -ladvapi32 -lole32

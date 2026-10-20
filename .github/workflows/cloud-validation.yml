@@ -1,0 +1,77 @@
+name: Cloud validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    name: Chromium real UI and backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run verify:teaching
+      - run: npm run build
+      - name: Install Chromium and operating system dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Real browser workflows with isolated fixtures and mock model
+        run: npm run test:browser
+      - name: Upload screenshots, traces and failure videos
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: browser-evidence
+          path: |
+            playwright-report/
+            test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  windows:
+    name: Windows MSVC build and real process
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Configure real Windows executable and regression tests
+        run: cmake -S tools/deployer -B tools/deployer/build -G "Visual Studio 17 2022" -A x64
+      - name: Compile with MSVC
+        run: cmake --build tools/deployer/build --config Release --parallel
+      - name: CTest with Release assertions enabled
+        run: ctest --test-dir tools/deployer/build -C Release --output-on-failure
+      - name: Real executable CLI and HTTP security smoke
+        run: node tools/deployer/tests/windows-smoke.mjs dist-deployer/campus-deploy.exe
+      - name: Upload Windows executable and CTest diagnostics
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: windows-evidence
+          path: |
+            dist-deployer/campus-deploy.exe
+            tools/deployer/build/Testing/Temporary/
+          if-no-files-found: warn
+          retention-days: 7

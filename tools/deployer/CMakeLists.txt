@@ -4,49 +4,52 @@ project(campus-deploy CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-if(NOT CMAKE_BUILD_TYPE)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-add_executable(campus-deploy
-  src/main.cpp
-  src/util.cpp
-  src/json.cpp
-  src/cloudflare.cpp
-  src/deploy.cpp
-  src/webconsole.cpp
-)
+function(configure_deployer_target target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /utf-8 /W3)
+    target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter)
+  endif()
+endfunction()
 
-# Windows 平台依赖：Winsock、IP 助手、Shell、注册表（注册表在 advapi32 中）
-target_link_libraries(campus-deploy PRIVATE ws2_32 iphlpapi shell32 bcrypt advapi32 ole32)
-
-if(MSVC)
-  target_compile_options(campus-deploy PRIVATE /utf-8 /W3)
-  target_compile_definitions(campus-deploy PRIVATE _CRT_SECURE_NO_WARNINGS)
-else()
-  target_compile_options(campus-deploy PRIVATE -Wall -Wextra -Wno-unused-parameter -static -static-libgcc -static-libstdc++)
-  target_link_options(campus-deploy PRIVATE -static -static-libgcc -static-libstdc++)
+if(WIN32)
+  add_executable(campus-deploy
+    src/main.cpp src/util.cpp src/json.cpp src/cloudflare.cpp src/deploy.cpp src/webconsole.cpp
+  )
+  target_link_libraries(campus-deploy PRIVATE ws2_32 iphlpapi shell32 bcrypt advapi32 ole32)
+  configure_deployer_target(campus-deploy)
+  if(NOT MSVC)
+    target_compile_definitions(campus-deploy PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(campus-deploy PRIVATE -static -static-libgcc -static-libstdc++)
+    target_link_options(campus-deploy PRIVATE -static -static-libgcc -static-libstdc++)
+  endif()
+  set_target_properties(campus-deploy PROPERTIES
+    # A generator expression suppresses Visual Studio's extra Release/ suffix.
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/../../dist-deployer/$<0:>"
+  )
 endif()
 
-# 输出到项目根的 dist-deployer/，方便直接分发
-set_target_properties(campus-deploy PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/../../dist-deployer"
-)
-
-# JSON 解析器测试：用真实的 Cloudflare / cloudflared 响应形态验证解析实现
-#   cmake --build <build-dir> --target json-test && ./json-test
-add_executable(json-test EXCLUDE_FROM_ALL
-  tests/json_test.cpp
-  src/json.cpp
-  src/util.cpp
-)
-target_link_libraries(json-test PRIVATE ws2_32 iphlpapi shell32 bcrypt advapi32)
-if(MSVC)
-  target_compile_options(json-test PRIVATE /utf-8 /W3)
-else()
-  target_compile_options(json-test PRIVATE -Wall -Wextra -Wno-unused-parameter)
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(json-test tests/json_test.cpp src/json.cpp)
+  add_executable(security-test tests/security_test.cpp src/json.cpp)
+  add_executable(state-test tests/state_test.cpp)
+  # Link-time adapters in tunnel_test.cpp deliberately replace all HTTP and file I/O.
+  add_executable(tunnel-test tests/tunnel_test.cpp src/cloudflare.cpp src/json.cpp)
+  foreach(target json-test security-test state-test tunnel-test)
+    configure_deployer_target(${target})
+    # Tests use assert: Release builds must execute assertions and their expressions.
+    if(MSVC)
+      target_compile_options(${target} PRIVATE /UNDEBUG)
+    else()
+      target_compile_options(${target} PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME ${target} COMMAND ${target})
+    set_tests_properties(${target} PROPERTIES TIMEOUT 30)
+  endforeach()
 endif()
-set_target_properties(json-test PROPERTIES
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/../../dist-deployer"
-)

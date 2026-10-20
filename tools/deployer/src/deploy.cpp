@@ -9,6 +9,7 @@
 #include "cloudflare.h"
 #include "util.h"
 #include "security.h"
+#include "state.h"
 
 namespace sc {
 
@@ -361,7 +362,23 @@ bool buildUpToDate(const std::string &projectDir) {
     return false;
   uint64_t distStamp =
       ((uint64_t)info.ftLastWriteTime.dwHighDateTime << 32) | info.ftLastWriteTime.dwLowDateTime;
-  return distStamp >= newestWriteTime(joinPath(projectDir, "src"));
+  std::vector<uint64_t> inputs;
+  WIN32_FIND_DATAW entry{};
+  HANDLE entries = FindFirstFileW(utf8ToWide(joinPath(projectDir, "*")).c_str(), &entry);
+  if (entries == INVALID_HANDLE_VALUE) return false;
+  do {
+    const std::string name = wideToUtf8(entry.cFileName);
+    if (!state::buildInput(name) || name == "tsconfig.tsbuildinfo") continue;
+    uint64_t stamp = ((uint64_t)entry.ftLastWriteTime.dwHighDateTime << 32) |
+                     entry.ftLastWriteTime.dwLowDateTime;
+    if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+      stamp = std::max(stamp, newestWriteTime(joinPath(projectDir, name)));
+    inputs.push_back(stamp);
+  } while (FindNextFileW(entries, &entry));
+  FindClose(entries);
+  for (const char *required : {"package.json", "package-lock.json", "index.html", "tsconfig.json"})
+    if (!isFile(joinPath(projectDir, required))) return false;
+  return isDirectory(joinPath(projectDir, "src")) && state::buildCurrent(distStamp, inputs);
 }
 }  // namespace
 
@@ -651,8 +668,8 @@ bool Deployer::startCustomDomainTunnel() {
   const std::string credentialsFile = joinPath(configDir, "tunnel.json");
   std::string tunnelId = options_.tunnelId;
 
-  // 1) 已有凭证文件可直接解析隧道 ID
-  {
+  // 1) Only local mode reuses local credentials; a supplied connector token takes precedence.
+  if (options_.tunnelToken.empty()) {
     std::string credentials;
     if (readFileUtf8(credentialsFile, credentials)) {
       Json json;
@@ -669,7 +686,7 @@ bool Deployer::startCustomDomainTunnel() {
   }
 
   // 2) 用 Cloudflare API 创建隧道（需要 API Token）
-  if (tunnelId.empty() && !options_.apiToken.empty()) {
+  if (tunnelId.empty() && options_.tunnelToken.empty() && !options_.apiToken.empty()) {
     std::string accountId;
     cf::Result verified = cf::verifyToken(options_.apiToken, accountId);
     if (!verified.ok) {
@@ -677,27 +694,13 @@ bool Deployer::startCustomDomainTunnel() {
       return false;
     }
     emit("ok", verified.message);
-    if (accountId.empty()) {
-      emit("warn", "无法确定账户 ID，将改用连接器令牌方式");
-    } else {
-      const std::string tunnelName = "smart-campus-homework";
-      const std::string body =
-          "{\"name\":\"" + jsonEscape(tunnelName) + "\",\"config_src\":\"local\"}";
-      HttpResponse response = httpPostJson(
-          "https://api.cloudflare.com/client/v4/accounts/" + accountId + "/cfd_tunnel", body,
-          {"authorization: Bearer " + options_.apiToken});
-      Json root;
-      std::string parseError;
-      if (Json::parse(response.body, root, &parseError) &&
-          root["success"].type() == Json::Type::Bool && root["success"].asBool()) {
-        tunnelId = root["result"]["id"].toStringOr("");
-        if (!tunnelId.empty())
-          emit("ok", "已创建命名隧道 " + tunnelName + "（ID " + tunnelId + "）");
-      } else {
-        const std::string message = root["errors"].at(0)["message"].toStringOr(response.body);
-        emit("warn", "创建隧道失败：" + message);
-      }
+    cf::Result created = cf::createLocalTunnel(options_.apiToken, accountId, credentialsFile);
+    if (!created.ok) {
+      emit("error", created.message);
+      return false;
     }
+    tunnelId = created.data["id"].toStringOr("");
+    emit("ok", created.message);
   }
   if (tunnelId.empty() && options_.tunnelToken.empty()) {
     emit("error",
@@ -716,6 +719,10 @@ bool Deployer::startCustomDomainTunnel() {
   // 3) 写入隧道配置（凭证文件缺失时用令牌方式启动）
   const std::string configFile = joinPath(configDir, "config.yml");
   const bool hasCredentials = isFile(credentialsFile);
+  if (!hasCredentials && options_.tunnelToken.empty()) {
+    emit("error", "缺少隧道凭据文件，已停止部署且未修改 DNS；请提供连接器令牌或有效本地凭据");
+    return false;
+  }
   std::ostringstream config;
   config << "tunnel: " << (tunnelId.empty() ? "smart-campus-homework" : tunnelId) << "\n";
   config << "credentials-file: \"" << replaceAll(credentialsFile, "\\", "/") << "\"\n";
@@ -723,7 +730,7 @@ bool Deployer::startCustomDomainTunnel() {
   config << "  - hostname: " << options_.domain << "\n";
   config << "    service: " << localUrl_ << "\n";
   config << "  - service: http_status:404\n";
-  if (hasCredentials) {
+  if (hasCredentials && options_.tunnelToken.empty()) {
     if (!writeFileUtf8(configFile, config.str())) {
       emit("error", "无法写入隧道配置：" + configFile);
       return false;
@@ -748,7 +755,7 @@ bool Deployer::startCustomDomainTunnel() {
     }
     emit("ok", dns.message);
   } else {
-    emit("warn", "未提供 API Token，跳过 DNS 自动配置。请手动在 Cloudflare 面板把 " +
+    emit("warn", "缺少 API Token 或隧道 ID，跳过 DNS 自动配置。请手动在 Cloudflare 面板把 " +
                      options_.domain + " 的 CNAME 指向 " +
                      (tunnelId.empty() ? "<隧道ID>" : tunnelId) + ".cfargotunnel.com");
   }
@@ -758,7 +765,9 @@ bool Deployer::startCustomDomainTunnel() {
   const std::string runMode = options_.tunnelToken.empty()
                                   ? "run " + (tunnelId.empty() ? std::string() : tunnelId)
                                   : "run --token " + options_.tunnelToken;
-  const std::string command = "cloudflared tunnel --no-autoupdate " + runMode +
+  const std::string configArg = options_.tunnelToken.empty()
+      ? "--config \"" + configFile + "\" " : "";
+  const std::string command = "cloudflared tunnel --no-autoupdate " + configArg + runMode +
                               " > \"" + logPath + "\" 2>&1";
   emit("info", "启动隧道连接器…");
   unsigned long pid = 0;
@@ -773,8 +782,7 @@ bool Deployer::startCustomDomainTunnel() {
     Sleep(500);
     std::string log;
     if (readFileUtf8(logPath, log)) {
-      if (contains(log, "Registered tunnel connection") ||
-          contains(log, "Connection registered") || contains(log, "connIndex=")) {
+      if (cf::registeredTunnel(log)) {
         tunnelUrl_ = "https://" + options_.domain;
         emit("ok", "隧道已建立：" + tunnelUrl_);
         return true;
@@ -791,9 +799,8 @@ bool Deployer::startCustomDomainTunnel() {
       return false;
     }
   }
-  emit("warn", "隧道启动较慢，请稍候几秒后用 https://" + options_.domain + " 访问");
-  tunnelUrl_ = "https://" + options_.domain;
-  return true;
+  emit("error", "30 秒内未确认隧道连接成功，请查看日志后重试：" + logPath);
+  return false;
 }
 
 // ============================ 主流程 ============================

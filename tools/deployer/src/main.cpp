@@ -45,13 +45,14 @@ void printHelp() {
 
 选项
   --domain <域名>         自定义域名，例如 homework.example.com
-  --api-token <令牌>      Cloudflare API Token（写 DNS 记录，需 Zone:DNS:Edit 权限）
+  --api-token <令牌>      Cloudflare API Token（写 DNS 记录，需 DNS:Edit、Zone:Read；创建隧道另需 Tunnel:Edit、账户读取）
   --tunnel-token <令牌>   命名隧道的连接器令牌（已有隧道时使用）
   --tunnel-id <ID>        已有隧道 ID（可选，与凭证文件配合）
   --port <端口>           服务端口，默认 8787
   --dir <目录>            指定源码目录；缺省时自动探测，找不到就从 GitHub 下载
   --repo <地址>           源码仓库，默认 https://github.com/turtlelnc/MES-Homework.git
   --web                   打开浏览器可视化部署控制台
+  --no-browser             启动 Web 控制台时不自动打开浏览器
   --web-port <端口>       Web 控制台端口，默认 8899
   --skip-install          跳过 npm install
   --skip-build            跳过 npm run build
@@ -277,7 +278,7 @@ int main(int argc, char **argv) {
   // Web 控制台模式
   if (args.web) {
     printBanner();
-    return runWebConsole(deployer, args.webPort, true);
+    return runWebConsole(deployer, args.webPort, !args.noBrowser);
   }
 
   // 有 --mode 时直接执行，否则进入交互菜单
@@ -287,7 +288,7 @@ int main(int argc, char **argv) {
   int result = runInteractive(deployer, args.webPort);
   if (result == kSwitchToWeb) {
     // 用户选择进入可视化控制台
-    return runWebConsole(deployer, args.webPort, true);
+    return runWebConsole(deployer, args.webPort, !args.noBrowser);
   }
   deployer.stop();
   return result;

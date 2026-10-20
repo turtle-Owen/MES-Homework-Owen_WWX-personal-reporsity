@@ -19,6 +19,14 @@ struct Result {
 /// 校验 API Token，并返回该 Token 可用的账户 ID。
 Result verifyToken(const std::string &apiToken, std::string &outAccountId);
 
+/// Create a locally managed tunnel and persist its matching credentials before success.
+/// No DNS mutation occurs here. A failed credential write must stop deployment.
+Result createLocalTunnel(const std::string &apiToken, const std::string &accountId,
+                         const std::string &credentialsFile);
+
+/// Connection indexes also occur in errors; require an actual registration message.
+bool registeredTunnel(const std::string &log);
+
 /// 为域名找到所属 DNS 区域 ID（从完整域名逐段去掉子域尝试）。
 Result findZoneId(const std::string &apiToken, const std::string &domain,
                   std::string &outZoneId, std::string &outZoneName);

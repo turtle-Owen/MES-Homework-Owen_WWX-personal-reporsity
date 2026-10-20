@@ -15,6 +15,7 @@
 #include "cloudflare.h"
 #include "util.h"
 #include "security.h"
+#include "state.h"
 
 namespace sc {
 
@@ -28,6 +29,7 @@ struct LogEntry {
 
 std::mutex g_mutex;
 std::vector<LogEntry> g_logs;
+uint64_t g_logStart = 0;
 std::atomic<bool> g_busy{false};
 std::atomic<bool> g_running{true};
 std::string g_phase = "idle";        // idle | deploy | stop | install
@@ -50,7 +52,10 @@ std::string nowTime() {
 void pushLog(const std::string &level, const std::string &message) {
   std::lock_guard<std::mutex> lock(g_mutex);
   g_logs.push_back(LogEntry{level, message, nowTime()});
-  if (g_logs.size() > 600) g_logs.erase(g_logs.begin(), g_logs.begin() + 200);
+  if (g_logs.size() > 600) {
+    g_logs.erase(g_logs.begin(), g_logs.begin() + 200);
+    g_logStart += 200;
+  }
 }
 
 std::string stepsToJson(const std::vector<Step> &steps) {
@@ -73,11 +78,11 @@ std::string stepsToJson(const std::vector<Step> &steps) {
   return out.str();
 }
 
-std::string logsToJson(size_t from) {
-  std::lock_guard<std::mutex> lock(g_mutex);
+// Caller holds g_mutex so records and returned cursor share one snapshot.
+std::string logsToJson(uint64_t from) {
   std::ostringstream out;
   out << "[";
-  size_t begin = from < g_logs.size() ? from : g_logs.size();
+  size_t begin = state::logBegin(from, g_logStart, g_logs.size());
   for (size_t i = begin; i < g_logs.size(); ++i) {
     if (i != begin) out << ",";
     out << "{\"level\":\"" << jsonEscape(g_logs[i].level) << "\",\"message\":\""
@@ -309,7 +314,7 @@ const char *kPage = R"HTML(<!doctype html>
         <label>服务端口<input type="number" id="port" value="8787" min="1" max="65535" /></label>
         <div id="domainFields" style="display:none">
           <label>自定义域名<input type="text" id="domain" placeholder="homework.example.com" /></label>
-          <label>Cloudflare API Token<input type="password" id="apiToken" placeholder="需要 Zone:DNS:Edit 权限" /></label>
+          <label>Cloudflare API Token<input type="password" id="apiToken" placeholder="需要 DNS:Edit、Zone:Read、Tunnel:Edit 和账户读取权限" /></label>
           <label>隧道连接器令牌（可选）<input type="password" id="tunnelToken" placeholder="Cloudflare Zero Trust 里复制的令牌" /></label>
           <div class="hint">域名需已托管在 Cloudflare。若只填 API Token，程序会自动创建命名隧道；若已有隧道，请填连接器令牌。</div>
         </div>
@@ -336,7 +341,7 @@ const char *kPage = R"HTML(<!doctype html>
   </div>
 </div>
 <script>
-let from = 0, timer = null;
+let from = 0, timer = null, stateLoading = false;
 const $ = (id) => document.getElementById(id);
 
 document.querySelectorAll('.mode').forEach((el) => {
@@ -386,13 +391,16 @@ function appendLogs(entries) {
     line.textContent = `[${e.time}] ${e.message}`;
     box.appendChild(line);
   }
+  while (box.children.length > 600) box.firstElementChild.remove();
   if (atBottom) box.scrollTop = box.scrollHeight;
 }
 function clearLogView() { $('log').innerHTML = ''; }
 
 async function loadState(refreshDeps) {
+  if (stateLoading) return null;
+  stateLoading = true;
   try {
-    const res = await fetch('/api/status' + (refreshDeps ? '?deps=1' : ''));
+    const res = await fetch('/api/status?from=' + from + (refreshDeps ? '&deps=1' : ''));
     const data = await res.json();
     if (data.deps) renderDeps(data.deps);
     renderSteps(data.steps || []);
@@ -412,8 +420,10 @@ async function loadState(refreshDeps) {
       $('urlBox').innerHTML = `<div class="urls"><b>访问地址</b>${data.urls.map((u) => `<a href="${esc(u)}" target="_blank">${esc(u)}</a>`).join('')}</div>`;
     }
     appendLogs(data.logs || []);
-    from = data.total || from;
-  } catch (e) { /* 忽略瞬时错误 */ }
+    from = data.total ?? from;
+    return data;
+  } catch (e) { return null; }
+  finally { stateLoading = false; }
 }
 
 async function installDeps() {
@@ -455,10 +465,8 @@ async function stopAll() {
 function startPolling() {
   if (timer) return;
   timer = setInterval(async () => {
-    await loadState(false);
-    const res = await fetch('/api/status');
-    const data = await res.json();
-    if (!data.busy && timer) { clearInterval(timer); timer = null; loadState(true); }
+    const data = await loadState(false);
+    if (data && !data.busy && timer) { clearInterval(timer); timer = null; loadState(true); }
   }, 700);
 }
 
@@ -506,7 +514,14 @@ void handleDeploy(SOCKET client, const std::string &body) {
     security::BusyReset reset{g_busy};
     try {
     std::vector<std::string> urls;
-    bool ok = g_deployer->deploy(urls);
+    // Recheck after the submitted mode has been applied. The initial page
+    // inspection uses LAN mode, where cloudflared is only optional.
+    std::vector<Dependency> deps = g_deployer->inspect();
+    bool missing = false;
+    for (const Dependency &dep : deps)
+      if (dep.required && !dep.available) missing = true;
+    bool ok = !missing || g_deployer->installDependencies(deps);
+    if (ok) ok = g_deployer->deploy(urls);
     std::lock_guard<std::mutex> lock(g_mutex);
     if (ok) {
       std::ostringstream out;
@@ -560,10 +575,10 @@ void handleInstall(SOCKET client) {
   sendResponse(client, 200, "application/json; charset=utf-8", "{\"ok\":true}");
 }
 
-void handleStatus(SOCKET client, bool refreshDeps) {
+void handleStatus(SOCKET client, bool refreshDeps, uint64_t cursor) {
   std::string steps, logs, phase, result, error;
   int percent = 0;
-  size_t total = 0;
+  uint64_t total = 0;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     steps = g_stepsJson;
@@ -571,9 +586,9 @@ void handleStatus(SOCKET client, bool refreshDeps) {
     result = g_result;
     error = g_error;
     percent = g_percent;
-    total = g_logs.size();
+    total = g_logStart + g_logs.size();
+    logs = logsToJson(cursor);
   }
-  logs = logsToJson(0);
   std::ostringstream out;
   out << "{\"busy\":" << (g_busy ? "true" : "false") << ",\"phase\":\"" << jsonEscape(phase)
       << "\",\"percent\":" << percent << ",\"total\":" << total << ",\"steps\":" << steps
@@ -671,7 +686,7 @@ int runWebConsole(Deployer &deployer, int port, bool openBrowser) {
     if (route == "/" || route == "/index.html") {
       sendResponse(client, 200, "text/html; charset=utf-8", kPage);
     } else if (route == "/api/status") {
-      handleStatus(client, withDeps);
+      handleStatus(client, withDeps, state::logCursor(request.path));
     } else if (route == "/api/deploy" && request.method == "POST") {
       handleDeploy(client, request.body);
     } else if (route == "/api/install" && request.method == "POST") {
