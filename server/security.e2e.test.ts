@@ -231,6 +231,23 @@ describe("HTTP authorization regressions (isolated SQLite; no model requests)", 
       (await request("/api/me", student, "PATCH", { className: "other-class" }))
         .status,
     ).toBe(403);
+    // Students must never modify staff-managed attributes such as subject.
+    expect(
+      (await request("/api/me", student, "PATCH", { subject: "物理" })).status,
+    ).toBe(403);
+    expect(
+      (await request("/api/me", student, "PATCH", { stage: "高中" })).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(
+          "/api/me",
+          student,
+          "PATCH",
+          { name: "新姓名", subject: "物理" },
+        )
+      ).status,
+    ).toBe(403);
     expect(
       (await request("/api/me", student, "PATCH", { name: "新姓名" })).status,
     ).toBe(200);

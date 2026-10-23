@@ -1,0 +1,2 @@
+exports = module.exports = require('./../commonjs/export/browser/index.js').default
+exports['default'] = require('./../commonjs/export/browser/index.js').default

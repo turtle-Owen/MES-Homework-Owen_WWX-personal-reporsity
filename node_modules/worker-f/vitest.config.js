@@ -1,0 +1,52 @@
+// import path from 'node:path'
+
+import { defineConfig } from 'vitest/config'
+import { playwright } from '@vitest/browser-playwright'
+
+export default defineConfig({
+  test: {
+		// This supposed workaround from Google doesn't work.
+		// // `vitest` has a bug when it doesn't know how to handle lowercase drive letters on Windows.
+		// // https://github.com/vitest-dev/vitest/issues/10692
+    // // Calling `path.resolve()` seems to somehow convert those drive letters from lowercase to uppercase.
+    // root: path.resolve(__dirname),
+
+    projects: [
+			{
+  			test: {
+					include: [
+						'src/**/*.test.ts'
+					],
+					exclude: [
+						'src/**/*.browser.test.ts',
+						'src/export/**/*.test.ts'
+					],
+					environment: 'node'
+				}
+			},
+
+			{
+  			test: {
+					include: [
+						'src/**/*.browser.test.ts'
+					],
+					exclude: [
+						'src/export/**/*.test.ts',
+					],
+					browser: {
+						provider: playwright(),
+						enabled: true,
+						// Don't create `__screenshots__` folders in case of browser tests not passing.
+						screenshotFailures: false,
+						// Don't create `.vitest-attachments` folders in case of browser tests not passing.
+						attachmentsDir: false,
+						instances: [
+							{ browser: 'chromium' },
+							{ browser: 'firefox' }
+						]
+					}
+				}
+			}
+		]
+  }
+})

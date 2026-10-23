@@ -1,0 +1,4 @@
+export class InvalidSpreadsheetError extends Error {
+	constructor(message: string);
+	name: 'InvalidSpreadsheetError';
+}

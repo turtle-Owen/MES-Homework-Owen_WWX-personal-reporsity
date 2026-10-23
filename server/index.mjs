@@ -39,6 +39,7 @@ import {
 } from "./grading.mjs";
 import {
   providerEndpoint,
+  assertPublicProviderEndpoint,
   sameOriginWrites,
   authRateLimit,
   validPassword,
@@ -121,6 +122,13 @@ app.use("/api", (req, res, next) => {
   next();
 });
 app.use(sameOriginWrites);
+// Only trust proxy headers when explicitly configured with the trusted proxy
+// count; otherwise req.ip (used by authRateLimit) would collapse every client
+// behind a CDN/reverse proxy into one shared bucket.
+if (process.env.TRUST_PROXY_HOPS) {
+  const hops = Number(process.env.TRUST_PROXY_HOPS);
+  if (Number.isSafeInteger(hops) && hops > 0) app.set("trust proxy", hops);
+}
 app.use(express.json({ limit: "2mb" }));
 app.use(
   ["/api/auth/login", "/api/auth/register", "/api/schools/register"],
@@ -213,11 +221,20 @@ function setSession(res, userId) {
     userId,
     new Date(Date.now() + 7 * 864e5).toISOString(),
   );
+  // Opportunistically purge expired sessions so the table cannot grow forever;
+  // throttled to at most once per minute to avoid a write on every login.
+  if (Date.now() - lastSessionSweep > 60_000) {
+    lastSessionSweep = Date.now();
+    db.prepare("DELETE FROM sessions WHERE expires_at<=?").run(iso());
+  }
   res.setHeader(
     "Set-Cookie",
-    `sc_session=${sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${process.env.NODE_ENV === "production" ? "; Secure" : ""}`,
+    `sc_session=${sid}; HttpOnly; SameSite=Lax; Path=/; Max-Age=604800${
+      process.env.NODE_ENV === "production" ? "; Secure" : ""
+    }`,
   );
 }
+let lastSessionSweep = 0;
 function encrypt(text) {
   const iv = randomBytes(12),
     c = createCipheriv("aes-256-gcm", secret, iv);
@@ -274,6 +291,9 @@ async function askModel(
     Object.hasOwn(providers, config.provider) && providers[config.provider];
   if (!preset) throw new Error("模型厂商无效");
   const endpoint = providerEndpoint(config.endpoint, preset);
+  // Re-validate at request time: an approved domain's DNS may have been
+  // repointed at an internal address (SSRF / DNS rebinding) since it was saved.
+  await assertPublicProviderEndpoint(endpoint);
   const release = reservation || reserveModel(userId);
   try {
     release.renew();
@@ -462,7 +482,7 @@ app.get("/api/settings/provider", auth, schoolStaff, (req, res) =>
       .get(req.user.id) || null,
   ),
 );
-app.put("/api/settings/provider", auth, schoolStaff, (req, res) => {
+app.put("/api/settings/provider", auth, schoolStaff, async (req, res) => {
   const p =
     Object.hasOwn(providers, req.body.provider) && providers[req.body.provider];
   if (!p || !req.body.apiKey)
@@ -475,6 +495,13 @@ app.put("/api/settings/provider", auth, schoolStaff, (req, res) => {
   }
   if (typeof req.body.apiKey !== "string" || req.body.apiKey.length > 8192)
     return res.status(400).json({ error: "API Key 格式无效" });
+  // Reject endpoints whose DNS resolves to internal addresses before saving,
+  // so a rebinding target cannot be persisted and used with the stored key.
+  try {
+    await assertPublicProviderEndpoint(endpoint);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
   const [key, iv] = encrypt(req.body.apiKey);
   const model = req.body.model || p.model;
   db.prepare(
@@ -1433,12 +1460,20 @@ app.post("/api/papers/generate", auth, teacher, (req, res) => {
       Math.max(1, Math.min(Math.floor(Number(req.body.count)) || 10, 50)),
     );
   const id = uid(),
-    title = req.body.title || "错题巩固卷";
+    rawTitle = req.body.title;
+  if (
+    rawTitle !== undefined &&
+    (typeof rawTitle !== "string" || !rawTitle.trim() || rawTitle.length > 120)
+  )
+    return res.status(400).json({ error: "试卷名称无效" });
+  const title = typeof rawTitle === "string" ? rawTitle.trim() : "错题巩固卷";
+  // Store only whitelisted fields instead of the raw request body to prevent
+  // unbounded payloads and latent injection when content is later rendered.
   db.prepare("INSERT INTO papers VALUES(?,?,?,?,?,?)").run(
     id,
     req.user.id,
     title,
-    JSON.stringify(req.body),
+    JSON.stringify({ title, count: rows.length }),
     JSON.stringify(rows),
     iso(),
   );
