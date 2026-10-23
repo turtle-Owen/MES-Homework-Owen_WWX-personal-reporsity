@@ -437,12 +437,15 @@ function SchoolDashboard({
   notify: (s: string) => void;
 }) {
   const [summary, setSummary] = useState<any>(null);
+  const [operations, setOperations] = useState<any>(null);
   const [teachers, setTeachers] = useState<TeacherAccount[]>([]);
   const load = () =>
     Promise.all([
       api<any>("/school/summary"),
       api<TeacherAccount[]>("/teachers"),
-    ]).then(([schoolSummary, teacherRows]) => {
+      api<any>("/operations"),
+    ]).then(([schoolSummary, teacherRows, status]) => {
+      setOperations(status);
       setSummary(schoolSummary);
       setTeachers(teacherRows);
     });
@@ -486,6 +489,41 @@ function SchoolDashboard({
           </div>
         ))}
       </div>
+      <section className="rc4-panel">
+        <div className="detail-head">
+          <h2>本校任务运行状态</h2>
+          <Button
+            onClick={() => void load().catch((error) => notify(error.message))}
+          >
+            刷新状态
+          </Button>
+        </div>
+        {operations ? (
+          <>
+            <p>
+              近 24 小时模型调用 {operations.modelUsage.callsLastDay} 次，近 1
+              小时 {operations.modelUsage.callsLastHour} 次，当前调用{" "}
+              {operations.modelUsage.active} 个。失败调用也计入用量。
+            </p>
+            <p>
+              近 15 分钟请求 {operations.requestsLast15Minutes.requests}{" "}
+              次，服务端错误 {operations.requestsLast15Minutes.serverErrors}{" "}
+              次，平均响应 {operations.requestsLast15Minutes.averageMs}{" "}
+              毫秒。此统计在服务重启后重新计数。
+            </p>
+            <p>
+              {["queued", "running", "succeeded", "failed"]
+                .map(
+                  (status) =>
+                    `${({ queued: "排队", running: "处理", succeeded: "成功", failed: "失败" } as Record<string, string>)[status]}：${operations.jobs.find((job: any) => job.status === status)?.count || 0}`,
+                )
+                .join(" · ")}
+            </p>
+          </>
+        ) : (
+          <p>正在加载运行状态…</p>
+        )}
+      </section>
       <div className="two-col">
         <form className="rc4-panel" onSubmit={addTeacher}>
           <h2>
@@ -1120,7 +1158,8 @@ function Review({ notify }: { notify: (s: string) => void }) {
   const [items, setItems] = useState<Submission[]>([]),
     [detail, setDetail] = useState<any>(null),
     [busy, setBusy] = useState<Record<string, string>>({}),
-    [loading, setLoading] = useState(false);
+    [loading, setLoading] = useState(false),
+    [attentionOnly, setAttentionOnly] = useState(false);
   const guard = useRef(createReviewGuard()).current;
   const listGeneration = useRef(0);
   const load = async () => {
@@ -1141,6 +1180,7 @@ function Review({ notify }: { notify: (s: string) => void }) {
   }, []);
   const select = async (id: string) => {
     const ticket = guard.select(id);
+    setAttentionOnly(false);
     setDetail(null);
     setLoading(true);
     try {
@@ -1152,6 +1192,38 @@ function Review({ notify }: { notify: (s: string) => void }) {
       if (guard.isCurrent(ticket)) setLoading(false);
     }
   };
+  // Poll only active jobs. Selection tickets prevent a late response replacing another draft.
+  useEffect(() => {
+    if (!items.some((item) => ["queued", "recognizing"].includes(item.status)))
+      return;
+    const timer = setInterval(() => void load(), 2000);
+    return () => clearInterval(timer);
+  }, [items]);
+  useEffect(() => {
+    if (!detail || !["queued", "recognizing"].includes(detail.status)) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const ticket = guard.current();
+    const poll = async () => {
+      try {
+        const result = await api<any>(`/submissions/${ticket.id}`);
+        if (cancelled || !guard.isCurrent(ticket)) return;
+        setDetail(normalizeReviewDetail(result));
+        if (!["queued", "recognizing"].includes(result.status)) {
+          void load();
+          return;
+        }
+      } catch {
+        /* Keep the saved job intact when a connection is interrupted. */
+      }
+      if (!cancelled) timer = setTimeout(poll, 2000);
+    };
+    timer = setTimeout(poll, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [detail?.id, detail?.status]);
   const finish = (
     ticket: NonNullable<ReturnType<typeof guard.startOperation>>,
   ) => {
@@ -1168,12 +1240,13 @@ function Review({ notify }: { notify: (s: string) => void }) {
     if (!operation) return;
     setBusy((state) => ({ ...state, [id]: "recognize" }));
     try {
-      await api(`/submissions/${id}/recognize`, { method: "POST" });
+      await api(`/submissions/${id}/recognition-jobs`, { method: "POST" });
       // Reload canonical status and scores instead of merging a result into another draft.
       if (guard.current().id === id) {
         // A fresh generation also supersedes a pending GET from reselecting A.
         await select(id);
-        if (guard.current().id === id) notify("逐页 OCR 完成，请逐题复核。");
+        if (guard.current().id === id)
+          notify("已加入后台识别队列，可切换答卷或稍后回来查看。");
       }
     } catch (e) {
       notify((e as Error).message);
@@ -1183,7 +1256,7 @@ function Review({ notify }: { notify: (s: string) => void }) {
   };
   const update = (questionId: string, key: string, value: any) =>
     setDetail((d: any) => {
-      if (!d || busy[d.id]) return d;
+      if (!d || busy[d.id] || d.status !== "review") return d;
       const question = d.questions?.find((q: any) => q.id === questionId);
       if (!question) return d;
       return {
@@ -1296,6 +1369,17 @@ function Review({ notify }: { notify: (s: string) => void }) {
                   </Button>
                 )}
               </div>
+              {detail.recognitionJob &&
+                ["queued", "recognizing", "failed"].includes(detail.status) && (
+                  <p role="status">
+                    {detail.status === "queued"
+                      ? "已排队，系统会自动处理。"
+                      : statusName(detail.status)}
+                    {` 已尝试 ${detail.recognitionJob.attempts} 次。`}
+                    {detail.recognitionJob.error &&
+                      ` ${detail.recognitionJob.error}`}
+                  </p>
+                )}
               {detail.files?.length > 0 && (
                 <div className="field">
                   <span>答卷原件（按上传顺序）</span>
@@ -1322,67 +1406,94 @@ function Review({ notify }: { notify: (s: string) => void }) {
               {detail.analysis && review.error && (
                 <p role="alert">{review.error}</p>
               )}
-              {review.rows.map(({ question, item: x }) => (
-                <fieldset
-                  className="review-item"
-                  key={question.id}
-                  disabled={!!busy[detail.id]}
-                >
-                  <div>
-                    <strong>
-                      第 {question.number} 题 · 满分 {question.score}
-                    </strong>
-                    <span className={(x.confidence || 0) < 0.8 ? "low" : ""}>
-                      置信度 {Math.round((x.confidence || 0) * 100)}%
-                    </span>
-                  </div>
-                  <p>{question.prompt}</p>
-                  {question.standard_answer && (
-                    <p>教师标准答案：{question.standard_answer}</p>
-                  )}
-                  <label>
-                    学生答案
-                    <textarea
-                      value={x.studentAnswer || ""}
-                      onChange={(e) =>
-                        update(question.id, "studentAnswer", e.target.value)
-                      }
-                    />
-                  </label>
-                  <label>
-                    订正说明
-                    <textarea
-                      value={x.correction || ""}
-                      onChange={(e) =>
-                        update(question.id, "correction", e.target.value)
-                      }
-                    />
-                  </label>
-                  <label className="check">
-                    <input
-                      type="checkbox"
-                      checked={x.isCorrect === true}
-                      onChange={(e) =>
-                        update(question.id, "isCorrect", e.target.checked)
-                      }
-                    />
-                    判为正确
-                  </label>
-                  <label className="field">
-                    <span>得分（0–{question.score}）</span>
-                    <input
-                      type="number"
-                      min={0}
-                      max={question.score}
-                      step="any"
-                      value={x.score ?? ""}
-                      onChange={(e) =>
-                        update(question.id, "score", e.target.value)
-                      }
-                    />
-                  </label>
-                </fieldset>
-              ))}
+              {detail.status === "review" && review.rows.length > 0 && (
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={attentionOnly}
+                    onChange={(e) => setAttentionOnly(e.target.checked)}
+                  />
+                  仅显示需重点复核的题目（
+                  {
+                    review.rows.filter(
+                      ({ item }) =>
+                        !Number.isFinite(item.confidence) ||
+                        Number(item.confidence) < 0.8 ||
+                        item.studentAnswer?.includes("无法辨认"),
+                    ).length
+                  }{" "}
+                  题）
+                </label>
+              )}
+              {review.rows
+                .filter(
+                  ({ item }) =>
+                    !attentionOnly ||
+                    !Number.isFinite(item.confidence) ||
+                    Number(item.confidence) < 0.8 ||
+                    item.studentAnswer?.includes("无法辨认"),
+                )
+                .map(({ question, item: x }) => (
+                  <fieldset
+                    className="review-item"
+                    key={question.id}
+                    disabled={!!busy[detail.id] || detail.status !== "review"}
+                  >
+                    <div>
+                      <strong>
+                        第 {question.number} 题 · 满分 {question.score}
+                      </strong>
+                      <span className={(x.confidence || 0) < 0.8 ? "low" : ""}>
+                        置信度 {Math.round((x.confidence || 0) * 100)}%
+                      </span>
+                    </div>
+                    <p>{question.prompt}</p>
+                    {question.standard_answer && (
+                      <p>教师标准答案：{question.standard_answer}</p>
+                    )}
+                    <label>
+                      学生答案
+                      <textarea
+                        value={x.studentAnswer || ""}
+                        onChange={(e) =>
+                          update(question.id, "studentAnswer", e.target.value)
+                        }
+                      />
+                    </label>
+                    <label>
+                      订正说明
+                      <textarea
+                        value={x.correction || ""}
+                        onChange={(e) =>
+                          update(question.id, "correction", e.target.value)
+                        }
+                      />
+                    </label>
+                    <label className="check">
+                      <input
+                        type="checkbox"
+                        checked={x.isCorrect === true}
+                        onChange={(e) =>
+                          update(question.id, "isCorrect", e.target.checked)
+                        }
+                      />
+                      判为正确
+                    </label>
+                    <label className="field">
+                      <span>得分（0–{question.score}）</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={question.score}
+                        step="any"
+                        value={x.score ?? ""}
+                        onChange={(e) =>
+                          update(question.id, "score", e.target.value)
+                        }
+                      />
+                    </label>
+                  </fieldset>
+                ))}
               {detail.status === "review" && (
                 <Button
                   className="full"
@@ -1405,6 +1516,7 @@ const statusName = (s: string) =>
   (
     ({
       uploaded: "等待识别",
+      queued: "排队中",
       recognizing: "识别中",
       review: "等待复核",
       completed: "已完成",

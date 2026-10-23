@@ -106,3 +106,35 @@ describe("resource and production configuration boundaries", () => {
     },
   );
 });
+
+it("rejects aggregate upload size before parsing file content and cleans temporary files", async () => {
+  const { validateUploads } = await import("./security.mjs");
+  const fs = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mes-total-upload-"));
+  const file = path.join(dir, "temporary");
+  fs.writeFileSync(file, "fixture");
+  let status = 0;
+  const response = {
+    once: () => {},
+    status: (value: number) => {
+      status = value;
+      return response;
+    },
+    json: () => {},
+  };
+  try {
+    validateUploads(
+      { files: [{ path: file, size: 200 * 1024 * 1024 }] },
+      response,
+      () => {
+        throw new Error("must reject");
+      },
+    );
+    expect(status).toBe(413);
+    expect(fs.existsSync(file)).toBe(false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

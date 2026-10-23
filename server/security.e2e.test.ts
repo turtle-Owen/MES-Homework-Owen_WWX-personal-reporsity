@@ -807,6 +807,128 @@ describe("HTTP authorization regressions (isolated SQLite; no model requests)", 
     ).json();
     expect(paper.questions.some((q: any) => q.id === qid)).toBe(false);
   });
+  it("queues OCR with authorization, deduplication, polling and private audit history", async () => {
+    db.exec("DELETE FROM model_usage");
+    fs.writeFileSync(
+      path.join(dir, "model-response.json"),
+      JSON.stringify({
+        delay: 600,
+        payload: { ocrText: "BACKGROUND_OCR", items: [] },
+      }),
+    );
+    const route = `/api/submissions/${submissionId}/recognition-jobs`;
+    expect((await request(route, student, "POST")).status).toBe(403);
+    expect((await request(route, outsider, "POST")).status).toBe(403);
+    expect((await request(route, peerTeacher, "POST")).status).toBe(404);
+    const response = await request(route, teacher, "POST");
+    expect(response.status).toBe(202);
+    const job = await response.json();
+    expect(job).not.toHaveProperty("user_id");
+    expect(job).not.toHaveProperty("token");
+    expect((await request(route, teacher, "POST")).status).toBe(409);
+    expect(
+      (
+        await request(
+          `/api/submissions/${submissionId}/recognize`,
+          teacher,
+          "POST",
+        )
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await request(
+          `/api/submissions/${submissionId}/review`,
+          teacher,
+          "POST",
+          {},
+        )
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await request(
+          `/api/submissions/${submissionId}/review-history`,
+          student,
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(
+          `/api/submissions/${submissionId}/review-history`,
+          outsider,
+        )
+      ).status,
+    ).toBe(404);
+    let detail: any;
+    for (let i = 0; i < 60; i++) {
+      detail = await (
+        await request(`/api/submissions/${submissionId}`, teacher)
+      ).json();
+      if (detail.recognitionJob?.status === "succeeded") break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(detail.status).toBe("review");
+    expect(detail.ocr_text).toBe("BACKGROUND_OCR");
+    const hidden = await (
+      await request(`/api/submissions/${submissionId}`, student)
+    ).json();
+    expect(hidden.analysis).toBeNull();
+    expect(hidden.recognitionJob).toBeUndefined();
+    const questions = db
+      .prepare("SELECT id FROM questions WHERE assignment_id=?")
+      .all(fixture.assignmentId);
+    expect(
+      (
+        await request(
+          `/api/submissions/${submissionId}/review`,
+          teacher,
+          "POST",
+          {
+            items: questions.map((q) => ({
+              questionId: q.id,
+              isCorrect: false,
+              score: 0,
+            })),
+          },
+        )
+      ).status,
+    ).toBe(200);
+    const history = await (
+      await request(`/api/submissions/${submissionId}/review-history`, teacher)
+    ).json();
+    expect(
+      history.some((row: any) => row.action === "recognition_requested"),
+    ).toBe(true);
+    expect(history.some((row: any) => row.action === "review_saved")).toBe(
+      true,
+    );
+    expect((await request("/api/operations", teacher)).status).toBe(403);
+    const admin = db
+      .prepare("SELECT id FROM users WHERE school_id=? AND is_school_admin=1")
+      .get(fixture.schoolId)!;
+    const sid = randomUUID();
+    db.prepare("INSERT INTO sessions VALUES(?,?,?)").run(
+      sid,
+      admin.id,
+      new Date(Date.now() + 60000).toISOString(),
+    );
+    const status = await (
+      await request("/api/operations", `sc_session=${sid}`)
+    ).json();
+    expect(
+      status.jobs.some(
+        (row: any) => row.status === "succeeded" && row.count >= 1,
+      ),
+    ).toBe(true);
+    expect(status.modelUsage.callsLastDay).toBeGreaterThan(0);
+    const foreignStatus = await (
+      await request("/api/operations", outsider)
+    ).json();
+    expect(foreignStatus.jobs).toEqual([]);
+    expect(foreignStatus.modelUsage.callsLastDay).toBe(0);
+  });
   it("handles malformed password values and limits repeated login attempts", async () => {
     expect(
       (

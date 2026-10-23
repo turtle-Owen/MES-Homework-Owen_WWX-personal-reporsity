@@ -22,3 +22,32 @@ CREATE INDEX IF NOT EXISTS idx_submission_files_submission ON submission_files(s
 
 CREATE TABLE IF NOT EXISTS model_usage(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,school_id TEXT NOT NULL,created_at INTEGER NOT NULL,finished_at INTEGER,lease_until INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_model_usage_school_time ON model_usage(school_id,created_at);
+
+
+-- Durable recognition queue. Payloads contain references, never uploaded data or keys.
+CREATE TABLE IF NOT EXISTS recognition_jobs(
+  id TEXT PRIMARY KEY, submission_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  school_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued'
+    CHECK(status IN('queued','running','succeeded','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL,
+  lease_until INTEGER, token TEXT, error TEXT, error_status INTEGER,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  FOREIGN KEY(submission_id) REFERENCES submissions(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_submission
+  ON recognition_jobs(submission_id) WHERE status IN('queued','running');
+CREATE INDEX IF NOT EXISTS idx_jobs_schedule ON recognition_jobs(status,available_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_school ON recognition_jobs(school_id,status);
+CREATE TABLE IF NOT EXISTS review_audit(
+  id TEXT PRIMARY KEY, submission_id TEXT NOT NULL, school_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL, action TEXT NOT NULL, before_json TEXT NOT NULL,
+  after_json TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_review_audit_submission ON review_audit(submission_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_users_school ON users(school_id,role);
+CREATE INDEX IF NOT EXISTS idx_assignments_teacher ON assignments(teacher_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_submissions_student ON submissions(student_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_model_usage_active ON model_usage(lease_until) WHERE finished_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_jobs_submission_history ON recognition_jobs(submission_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_submissions_file_path ON submissions(file_path);

@@ -17,6 +17,7 @@ export function createModelBudget(db) {
     staff: positiveLimit("MODEL_STAFF_HOURLY_LIMIT", 120),
     schoolHour: positiveLimit("MODEL_SCHOOL_HOURLY_LIMIT", 600),
     schoolDay: positiveLimit("MODEL_SCHOOL_DAILY_LIMIT", 3000),
+    globalConcurrency: positiveLimit("MODEL_GLOBAL_CONCURRENCY", 8),
     concurrency: positiveLimit("MODEL_SCHOOL_CONCURRENCY", 4),
   };
   return (userId) => {
@@ -52,9 +53,19 @@ export function createModelBudget(db) {
           now - 3600000,
           user.school_id,
         );
-      if (usage.user_active || usage.school_active >= limits.concurrency)
+      const globalActive = db
+        .prepare(
+          "SELECT COUNT(*) n FROM model_usage WHERE finished_at IS NULL AND lease_until>?",
+        )
+        .get(now).n;
+      if (
+        usage.user_active ||
+        usage.school_active >= limits.concurrency ||
+        globalActive >= limits.globalConcurrency
+      )
         throw Object.assign(new Error("模型任务正在进行，请等待完成后重试"), {
           status: 429,
+          code: "MODEL_BUSY",
         });
       if (
         usage.user_hour >=
@@ -64,7 +75,7 @@ export function createModelBudget(db) {
       )
         throw Object.assign(
           new Error("模型调用已达账户或学校限额，请稍后重试"),
-          { status: 429 },
+          { status: 429, code: "MODEL_QUOTA" },
         );
       id = randomUUID();
       db.prepare("INSERT INTO model_usage VALUES(?,?,?,?,NULL,?)").run(

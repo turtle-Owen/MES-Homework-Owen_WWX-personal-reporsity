@@ -116,6 +116,16 @@ export function validateUploads(req, res, next) {
   res.once("finish", cleanup);
   res.once("close", cleanup);
   try {
+    const configured = Number(process.env.UPLOAD_TOTAL_MB);
+    const maxBytes =
+      (Number.isSafeInteger(configured) && configured > 0 ? configured : 50) *
+      1024 *
+      1024;
+    if (uploads.reduce((sum, file) => sum + file.size, 0) > maxBytes)
+      throw Object.assign(
+        new Error("整份上传超过总大小限制，请拆分或压缩后上传"),
+        { status: 413 },
+      );
     for (const file of uploads) {
       const fd = fs.openSync(file.path, "r");
       const header = Buffer.alloc(16);
@@ -129,6 +139,6 @@ export function validateUploads(req, res, next) {
     next();
   } catch (error) {
     cleanup();
-    res.status(400).json({ error: error.message });
+    res.status(error.status || 400).json({ error: error.message });
   }
 }

@@ -100,6 +100,11 @@ test("two pages form one submission; OCR and manual scores save consistently", a
   const rows = page.locator("fieldset.review-item");
   await expect(rows).toHaveCount(8);
   await expect(rows.first()).toContainText("教师标准答案：");
+  const focus = page.getByLabel(/仅显示需重点复核的题目/);
+  await focus.check();
+  await expect(rows).toHaveCount(0); // mock confidence is 95%, so none need triage.
+  await focus.uncheck();
+  await expect(rows).toHaveCount(8);
   await rows.first().getByRole("checkbox").check();
   await expect(rows.first().getByRole("spinbutton")).toHaveValue("5");
   await rows.nth(1).getByRole("spinbutton").fill("1");
@@ -278,6 +283,29 @@ test("student UI keeps exercise answers private and exposes only own attachments
   ).toHaveCount(0);
   await page.screenshot({
     path: "test-results/student-notebook.png",
+    fullPage: true,
+  });
+});
+
+test("school administrators can inspect their queue and usage without teaching controls", async ({
+  page,
+}) => {
+  await login(page, "admin@fixture.test");
+  await expect(
+    page.getByRole("heading", { name: "本校任务运行状态" }),
+  ).toBeVisible();
+  await expect(page.getByText(/近 24 小时模型调用/)).toBeVisible();
+  await expect(page.getByText(/近 15 分钟请求/)).toBeVisible();
+  const refreshed = page.waitForResponse((r) =>
+    r.url().endsWith("/api/operations"),
+  );
+  await page.getByRole("button", { name: "刷新状态" }).click();
+  expect((await refreshed).status()).toBe(200);
+  await expect(
+    page.getByRole("button", { name: "识别与复核", exact: true }),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: "test-results/school-operations.png",
     fullPage: true,
   });
 });
