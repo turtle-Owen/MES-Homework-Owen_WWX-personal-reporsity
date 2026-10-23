@@ -1,0 +1,87 @@
+{
+  "name": "worker-f",
+  "version": "0.1.20",
+  "description": "Runs a function in a separate thread in a web browser or Node.js",
+  "type": "module",
+  "exports": {
+    "./browser": {
+      "types": "./lib/export/browser/index.d.ts",
+      "import": "./lib/export/browser/index.js",
+      "require": "./browser/index.cjs"
+    },
+    "./browser/stream": {
+      "types": "./lib/export/browser/stream/index.d.ts",
+      "import": "./lib/export/browser/stream/index.js",
+      "require": "./browser/stream/index.cjs"
+    },
+    "./node": {
+      "types": "./lib/export/node/index.d.ts",
+      "import": "./lib/export/node/index.js",
+      "require": "./node/index.cjs"
+    },
+    "./node/stream": {
+      "types": "./lib/export/node/stream/index.d.ts",
+      "import": "./lib/export/node/stream/index.js",
+      "require": "./node/stream/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "test": "vitest run --browser.headless --bail=1",
+    "test-mocha": "mocha --bail \"src/**/*.test.ts\"",
+    "test-tape": "tape \"src/**/*.test.ts\" | tap-arc",
+    "test-export-tape": "tape \"src/export/**/*.test.ts\" | tap-arc",
+    "clean-for-build": "rimraf ./commonjs ./lib",
+    "build-commonjs-modules": "babel ./lib --out-dir ./commonjs --source-maps",
+    "build-commonjs-package.json": "node build-scripts/create-commonjs-package-json.js",
+    "build-commonjs": "npm-run-all build-commonjs-modules build-commonjs-package.json",
+    "build-typescript": "npx tsc --project tsconfig.build.json --declaration",
+    "browser-build": "rollup --config rollup.config.mjs",
+    "build": "npm-run-all clean-for-build build-typescript build-commonjs browser-build",
+    "prepublishOnly": "npm-run-all build test test-export-tape browser-build"
+  },
+  "engines": {
+    "node": ">=12"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.17.10",
+    "@babel/core": "^7.17.12",
+    "@babel/plugin-proposal-class-properties": "^7.17.12",
+    "@babel/plugin-transform-for-of": "^7.17.12",
+    "@babel/plugin-transform-runtime": "^7.17.12",
+    "@babel/preset-env": "^7.17.12",
+    "@rollup/plugin-commonjs": "^29.0.3",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-terser": "^1.0.0",
+    "@types/node": "^26.0.1",
+    "@types/react": "^19.2.17",
+    "@vitest/browser-playwright": "^4.1.10",
+    "core-js": "^3.22.5",
+    "cross-env": "^10.1.0",
+    "npm-run-all": "^4.1.5",
+    "rimraf": "^6.1.3",
+    "rollup": "^2.73.0",
+    "tap-arc": "^1.3.2",
+    "tape": "^5.10.2",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://gitlab.com/catamphetamine/worker-f"
+  },
+  "keywords": [
+    "worker",
+    "webworker",
+    "function"
+  ],
+  "author": "catamphetamine <purecatamphetamine@gmail.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://gitlab.com/catamphetamine/worker-f/issues"
+  },
+  "homepage": "https://gitlab.com/catamphetamine/worker-f#readme"
+}

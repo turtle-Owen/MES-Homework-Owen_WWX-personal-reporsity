@@ -1,0 +1,31 @@
+export default {
+  "presets": [
+    [
+      "@babel/preset-env",
+      {
+        // `transform-typeof-symbol` plugin adds a `_typeof` function.
+        // Because that function is not added as a "dependency" of a worker function,
+        // it results in a runtime error when running in CommonJS environment:
+        // "ReferenceError: _typeof is not defined".
+        // A workaround is to disable this plugin.
+        // If the code doesn't include `typeof ...Symbol...` statements
+        // then disabling this plugin is supposed to not introduce any bugs.
+        // https://babeljs.io/docs/babel-plugin-transform-typeof-symbol
+        "exclude": ["@babel/plugin-transform-typeof-symbol"]
+      }
+    ]
+  ],
+
+  // `transform-spread` plugin adds a `_toConsumableArray` function.
+  // Because that function is not added as a "dependency" of a worker function,
+  // it results in a runtime error when running in CommonJS environment:
+  // "ReferenceError: _toConsumableArray is not defined".
+  // A workaround is to tell it to assume that any "iterable" is an array,
+  // i.e. anything that is used in a `for of` loop is an array, etc.
+  // If the code doesn't pass anything other than arrays to `for of` loops, etc,
+  // then disabling this plugin is supposed to not introduce any bugs.
+  // https://babeljs.io/docs/babel-plugin-transform-spread
+  "assumptions": {
+    "iterableIsArray": true
+  }
+}

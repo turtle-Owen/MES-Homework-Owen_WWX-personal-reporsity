@@ -1,0 +1,17 @@
+// This code was originally submitted by Etienne Prothon.
+// https://gitlab.com/catamphetamine/read-excel-file/-/merge_requests/11
+
+// The reason why the input is not a valid `.xlsx` file.
+export type InvalidInputErrorCode =
+	'INPUT_TYPE_NOT_SUPPORTED' |
+	'XLS_FILE_NOT_SUPPORTED' |
+	'FILE_NOT_SUPPORTED' |
+	'INVALID_ZIP' |
+	'NO_DATA';
+
+// This error is thrown when the input is not a valid `.xlsx` file.
+export class InvalidInputError extends Error {
+	constructor(code: InvalidInputErrorCode);
+	code: InvalidInputErrorCode;
+	name: 'InvalidInputError';
+}

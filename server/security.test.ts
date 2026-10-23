@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { providerEndpoint, uploadType, validPassword } from "./security.mjs";
+import {
+  providerEndpoint,
+  uploadType,
+  validPassword,
+  isPrivateAddress,
+  assertPublicProviderEndpoint,
+} from "./security.mjs";
 import { providers } from "./providers.mjs";
 
 describe("provider credential destination", () => {
@@ -27,6 +33,69 @@ describe("provider credential destination", () => {
     "file:///etc/passwd",
   ])("rejects untrusted destination %s", (endpoint) => {
     expect(() => providerEndpoint(endpoint, providers.openai, "")).toThrow();
+  });
+});
+
+describe("SSRF DNS resolution guard", () => {
+  it.each([
+    "127.0.0.1",
+    "10.0.0.5",
+    "169.254.169.254",
+    "172.16.0.1",
+    "192.168.1.1",
+    "0.0.0.0",
+    "::1",
+    "fd00::1",
+    "fe80::1",
+    "::ffff:127.0.0.1",
+    "not-an-ip",
+  ])("classifies %s as private or invalid", (address) => {
+    expect(isPrivateAddress(address)).toBe(true);
+  });
+  it.each(["93.184.216.34", "2606:4700:4400::ac40:93bc"])(
+    "classifies %s as public",
+    (address) => {
+      expect(isPrivateAddress(address)).toBe(false);
+    },
+  );
+  it("rejects an approved domain whose DNS was rebound to an internal address", async () => {
+    await expect(
+      assertPublicProviderEndpoint("https://gateway.example/v1/chat", async () => [
+        "169.254.169.254",
+      ]),
+    ).rejects.toThrow("内网");
+  });
+  it("rejects when any resolved record is internal (happy eyeballs dual-stack)", async () => {
+    await expect(
+      assertPublicProviderEndpoint("https://gateway.example/v1/chat", async () => [
+        "93.184.216.34",
+        "::1",
+      ]),
+    ).rejects.toThrow("内网");
+  });
+  it("accepts a domain resolving only to public addresses", async () => {
+    await expect(
+      assertPublicProviderEndpoint("https://gateway.example/v1/chat", async () => [
+        "93.184.216.34",
+      ]),
+    ).resolves.toBe("https://gateway.example/v1/chat");
+  });
+  it("rejects failed or empty DNS resolution", async () => {
+    await expect(
+      assertPublicProviderEndpoint("https://gone.example/v1", async () => {
+        throw new Error("ENOTFOUND");
+      }),
+    ).rejects.toThrow("无法解析");
+    await expect(
+      assertPublicProviderEndpoint("https://gone.example/v1", async () => []),
+    ).rejects.toThrow("无法解析");
+  });
+  it("rejects literal internal IPs without needing lookup", async () => {
+    await expect(
+      assertPublicProviderEndpoint("https://127.0.0.1:8080/admin", async () => {
+        throw new Error("lookup must not be called for literals");
+      }),
+    ).rejects.toThrow("内网");
   });
 });
 
