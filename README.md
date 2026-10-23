@@ -192,3 +192,7 @@ Windows 自定义域名部署会保存与新建隧道匹配的本地凭据，凭
 `.github/workflows/cloud-validation.yml` 在 PR 更新和 main 推送时运行，使用只读仓库权限，不需要模型或 Cloudflare 凭据。Ubuntu job 运行后端回归、生产构建和六项 Chromium 实际界面测试；Windows job 用 MSVC 编译真实部署器、运行四组 CTest 并启动 exe 检查 CLI 与本机 HTTP 安全边界。Windows smoke 不执行依赖安装、实际应用部署或 DNS 修改。
 
 浏览器数据由 `tests/browser/server.mjs` 在系统临时目录中创建，模型调用在该测试进程内全部拦截；不会读取真实运行数据。开发环境可执行 `npm run build`、`npx playwright install --with-deps chromium`、`npm run test:browser`。浏览器截图、失败录像/trace 与 Windows exe/CTest 日志作为 Actions artifacts 保留 7 天；这些产物仅含合成夹具。请以实际 Actions 运行结果为准，工作流配置本身不代表验证已经通过。
+
+## 后台任务与运维
+
+后台 OCR 队列、并发限制、复核审计、备份恢复及容量/效果评测见 [OPERATIONS.md](OPERATIONS.md)。

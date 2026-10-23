@@ -1,4 +1,7 @@
 import express from "express";
+import { createRequestMetrics } from "./request-metrics.mjs";
+import { createRecognitionQueue, publicJob } from "./recognition-queue.mjs";
+import { recognitionFiles } from "./recognition-files.mjs";
 import multer from "multer";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -14,8 +17,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { providers, publicProviders } from "./providers.mjs";
-import { documentImages, cleanModelJson } from "./document.mjs";
-import { extractWordDocument, isWordDocument } from "./word.mjs";
+import { cleanModelJson } from "./document.mjs";
+import { isWordDocument } from "./word.mjs";
 import {
   buildAssignmentStats,
   buildStudentStats,
@@ -57,6 +60,7 @@ const data = path.resolve(process.env.DATA_DIR || path.join(root, "data"));
 const files = path.join(data, "uploads");
 fs.mkdirSync(files, { recursive: true });
 const db = new DatabaseSync(path.join(data, "smart-campus.sqlite"));
+db.exec("PRAGMA busy_timeout=5000");
 db.exec(fs.readFileSync(path.join(root, "server/schema.sql"), "utf8"));
 if (
   !db
@@ -103,7 +107,19 @@ if (
   );
 const reserveModel = createModelBudget(db);
 const app = express();
+const requestMetrics = createRequestMetrics();
 app.disable("x-powered-by");
+app.use("/api", (req, res, next) => {
+  const started = performance.now();
+  res.once("finish", () =>
+    requestMetrics.record(
+      req.user?.school_id,
+      res.statusCode,
+      performance.now() - started,
+    ),
+  );
+  next();
+});
 app.use(sameOriginWrites);
 app.use(express.json({ limit: "2mb" }));
 app.use(
@@ -232,7 +248,13 @@ function providerFor(userId, { vision = false } = {}) {
   return { config, preset };
 }
 
-async function askModel(userId, prompt, images = [], reservation = null) {
+async function askModel(
+  userId,
+  prompt,
+  images = [],
+  reservation = null,
+  signal = null,
+) {
   const { config } = providerFor(userId, { vision: images.length > 0 });
   const content = [{ type: "text", text: prompt }];
   images.forEach((image, index) => {
@@ -257,7 +279,10 @@ async function askModel(userId, prompt, images = [], reservation = null) {
     release.renew();
     const rr = await fetch(endpoint, {
       redirect: "error",
-      signal: AbortSignal.timeout(60000),
+      signal: AbortSignal.any([
+        AbortSignal.timeout(60000),
+        ...(signal ? [signal] : []),
+      ]),
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -270,7 +295,10 @@ async function askModel(userId, prompt, images = [], reservation = null) {
         messages: [{ role: "user", content: images.length ? content : prompt }],
       }),
     });
-    if (!rr.ok) throw new Error(`模型接口请求失败 (${rr.status})`);
+    if (!rr.ok)
+      throw Object.assign(new Error(`模型接口请求失败 (${rr.status})`), {
+        retryable: rr.status === 429 || rr.status >= 500,
+      });
     const raw = await rr.json();
     const text = raw.choices?.[0]?.message?.content;
     if (!text) throw new Error("模型没有返回识别内容");
@@ -709,24 +737,24 @@ app.post(
       return res
         .status(400)
         .json({ error: "请选择作业图片、PDF、DOCX 或 DOC" });
+    let reservation;
     try {
+      providerFor(req.user.id);
+      reservation = reserveModel(req.user.id);
+      const { images, documentText, warnings } = await recognitionFiles(
+        [{ file_path: req.file.path, file_type: req.file.mimetype }],
+        AbortSignal.timeout(120000),
+      );
       const word = isWordDocument(req.file.mimetype, req.file.originalname)
-        ? await extractWordDocument(
-            req.file.path,
-            req.file.mimetype,
-            req.file.originalname,
-          )
+        ? { text: documentText, warnings }
         : null;
-      const images = word
-        ? word.images
-        : await documentImages(req.file.path, req.file.mimetype);
       const knowledge = db
         .prepare(
           "SELECT id,title,description FROM knowledge WHERE school_id=? AND stage=? AND subject=? ORDER BY title",
         )
         .all(req.user.school_id, req.user.stage, req.user.subject);
       const prompt = `你是学校作业数字化助手。请忠实解析这份教师上传的作业原件，并整理为可直接发布的草稿。\n教师设置：学段=${req.user.stage}，学科=${req.user.subject}，班级=${req.user.class_name}。\n${word ? `Word 文档已提取文字：\n${word.text}\n` : "图片/PDF 已按页面附在消息中。"}\n现有校本知识库=${JSON.stringify(knowledge)}。\n规则：1. 只能提取原件中实际出现的题目，按原顺序，不得补题或改题；2. 无法辨认的部分写[无法辨认]；3. 原件没有答案时，根据题目自行推导标准答案与简明评分要点，并在 answerGenerated 标记 true；4. 优先使用现有知识点；没有匹配项时生成一个符合该学段教材的简洁知识点名称，并在 knowledgeGenerated 标记 true；5. 原件未标分值时，根据题型和难度给出合理分值。\n只返回 JSON：{"title":"原件标题或文件名","questions":[{"prompt":"完整题干","standardAnswer":"答案与评分要点","score":10,"knowledgeTitle":"知识点","answerGenerated":true,"knowledgeGenerated":false}],"warnings":["确实需要教师注意的识别问题"]}`;
-      const parsed = await askModel(req.user.id, prompt, images);
+      const parsed = await askModel(req.user.id, prompt, images, reservation);
       if (!Array.isArray(parsed.questions) || !parsed.questions.length)
         throw new Error("未从文件中识别到题目，请检查图片清晰度或模型配置");
       const knowledgeMap = new Map(
@@ -774,6 +802,7 @@ app.post(
         .status(modelErrorStatus(error))
         .json({ error: error.message || "作业解析失败" });
     } finally {
+      reservation?.();
       if (req.file?.path) fs.rmSync(req.file.path, { force: true });
     }
   },
@@ -1032,9 +1061,143 @@ app.get("/api/submissions/:id", auth, (req, res) => {
     analysis_json: analysis ? JSON.stringify(analysis) : null,
     ocr_text: visible ? s.ocr_text : null,
     analysis,
+    recognitionJob: student
+      ? undefined
+      : publicJob(
+          db
+            .prepare(
+              "SELECT * FROM recognition_jobs WHERE submission_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            )
+            .get(s.id),
+        ),
   });
 });
+function auditReview(submission, actorId, action, after) {
+  const assignment = db
+    .prepare("SELECT school_id FROM assignments WHERE id=?")
+    .get(submission.assignment_id);
+  const summary = (row) => ({
+    status: row.status,
+    reviewed: row.teacher_reviewed,
+    score: row.score,
+  });
+  db.prepare("INSERT INTO review_audit VALUES(?,?,?,?,?,?,?,?)").run(
+    uid(),
+    submission.id,
+    assignment.school_id,
+    actorId,
+    action,
+    JSON.stringify(summary(submission)),
+    JSON.stringify(after),
+    iso(),
+  );
+}
+async function recognizeSubmission(
+  s,
+  userId,
+  reservation,
+  signal,
+  assertLease = () => {},
+) {
+  const qs = db
+    .prepare(
+      "SELECT q.*,k.title knowledge_title FROM questions q LEFT JOIN knowledge k ON k.id=q.knowledge_id WHERE assignment_id=? ORDER BY number",
+    )
+    .all(s.assignment_id);
+  const { images, documentText } = await recognitionFiles(
+    submissionFiles(s),
+    signal,
+  );
+  assertLease();
+  const prompt = `学校作业 OCR、自动批改与个性化练习。学段=${s.stage}，学科=${s.subject}。\n教师已经录入的正式题目=${JSON.stringify(qs)}。\n${documentText ? `答卷文字（按附件顺序）：\n${documentText}\n` : "学生答卷页面已附在消息中。"}\n规则：1. 忠实识别学生实际填写内容；2. 只能按 questionId 对齐正式题目；3. 无法辨认写[无法辨认]且 confidence 低于0.5；4. 自动判断正误和得分；5. 错题必须生成分步解析、错误原因、订正答案，以及2道同知识点同题型但数值或情境不同的练习题；6. 每个正式题目恰好返回一项。\n只返回 JSON：{"ocrText":"完整识别原文","items":[{"questionId":"题目id","knowledgeId":"知识点id","studentAnswer":"学生答案","isCorrect":false,"score":0,"reason":"错误原因","correction":"正确答案","explanation":"分步题目解析","confidence":0.0,"practiceQuestions":[{"prompt":"同类题","answer":"答案","explanation":"解析"}]}]}`;
+  const parsed = await askModel(userId, prompt, images, reservation, signal);
+  return parsed;
+}
 const recognitionJobs = new Set();
+const recognitionQueue = createRecognitionQueue(
+  db,
+  async (job, { signal, assertLease }) => {
+    const submission = db
+      .prepare(
+        "SELECT s.*,a.teacher_id,a.stage,a.subject FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=? AND a.teacher_id=?",
+      )
+      .get(job.submission_id, job.user_id);
+    if (!submission) throw new Error("提交不存在");
+    providerFor(job.user_id);
+    const reservation = reserveModel(job.user_id);
+    try {
+      assertLease();
+      db.prepare("UPDATE submissions SET status='recognizing' WHERE id=?").run(
+        submission.id,
+      );
+      return await recognizeSubmission(
+        submission,
+        job.user_id,
+        reservation,
+        signal,
+        assertLease,
+      );
+    } finally {
+      reservation();
+    }
+  },
+);
+app.post("/api/submissions/:id/recognition-jobs", auth, teacher, (req, res) => {
+  const submission = db
+    .prepare(
+      "SELECT s.* FROM submissions s JOIN assignments a ON a.id=s.assignment_id WHERE s.id=? AND a.teacher_id=?",
+    )
+    .get(req.params.id, req.user.id);
+  if (!submission) return res.status(404).json({ error: "提交不存在" });
+  if (recognitionJobs.has(submission.id))
+    return res.status(409).json({ error: "识别正在进行中" });
+  try {
+    providerFor(req.user.id);
+    const job = recognitionQueue.enqueue(submission, req.user);
+    res.status(202).json(publicJob(job));
+  } catch (e) {
+    if (e.status === 429) res.set("Retry-After", "5");
+    res.status(modelErrorStatus(e)).json({ error: e.message });
+  }
+});
+app.get(
+  "/api/submissions/:id/review-history",
+  auth,
+  schoolStaff,
+  (req, res) => {
+    const submission = submissionFor(req);
+    if (!submission) return res.status(404).json({ error: "提交不存在" });
+    res.json(
+      db
+        .prepare(
+          "SELECT id,actor_id,action,before_json,after_json,created_at FROM review_audit WHERE submission_id=? ORDER BY created_at DESC,id DESC LIMIT 100",
+        )
+        .all(submission.id),
+    );
+  },
+);
+app.get("/api/operations", auth, schoolAdmin, (req, res) => {
+  const jobs = db
+    .prepare(
+      "SELECT status,COUNT(*) count,MIN(created_at) oldest FROM recognition_jobs WHERE school_id=? GROUP BY status",
+    )
+    .all(req.user.school_id);
+  const time = Date.now();
+  const usage = db
+    .prepare(
+      `SELECT COUNT(*) callsLastDay,
+    COALESCE(SUM(created_at>?),0) callsLastHour,
+    COALESCE(SUM(finished_at IS NULL AND lease_until>?),0) active
+    FROM model_usage WHERE school_id=? AND created_at>?`,
+    )
+    .get(time - 3600000, time, req.user.school_id, time - 86400000);
+  res.json({
+    jobs,
+    modelUsage: usage,
+    uptimeSeconds: Math.floor(process.uptime()),
+    requestsLast15Minutes: requestMetrics.snapshot(req.user.school_id),
+  });
+});
 app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
   const s = db
     .prepare(
@@ -1042,7 +1205,7 @@ app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
     )
     .get(req.params.id, req.user.id);
   if (!s) return res.status(404).json({ error: "提交不存在" });
-  if (recognitionJobs.has(s.id))
+  if (recognitionJobs.has(s.id) || recognitionQueue.active(s.id))
     return res.status(409).json({ error: "识别正在进行中" });
   recognitionJobs.add(s.id);
   let reservation;
@@ -1053,40 +1216,18 @@ app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
     db.prepare(
       "UPDATE submissions SET status='recognizing',teacher_reviewed=0,score=NULL WHERE id=?",
     ).run(s.id);
+    auditReview(s, req.user.id, "recognition_requested", {
+      status: "recognizing",
+      reviewed: 0,
+      score: null,
+    });
     started = true;
-    const qs = db
-      .prepare(
-        "SELECT q.*,k.title knowledge_title FROM questions q LEFT JOIN knowledge k ON k.id=q.knowledge_id WHERE assignment_id=? ORDER BY number",
-      )
-      .all(s.assignment_id);
-    const images = [];
-    const texts = [];
-    for (const [index, file] of submissionFiles(s).entries()) {
-      if (isWordDocument(file.file_type, file.file_path)) {
-        const word = await extractWordDocument(
-          file.file_path,
-          file.file_type,
-          file.file_path,
-        );
-        texts.push(`附件 ${index + 1}：${word.text}`);
-        images.push(...word.images);
-      } else {
-        images.push(
-          ...(await documentImages(
-            file.file_path,
-            file.file_type,
-            10 - images.length,
-          )),
-        );
-      }
-      if (images.length > 10 || texts.join("\n").length > 1000000)
-        throw new Error(
-          "整份答卷最多 10 页图片，文字不得超过 100 万字符，请拆分或压缩后重试",
-        );
-    }
-    const documentText = texts.join("\n");
-    const prompt = `学校作业 OCR、自动批改与个性化练习。学段=${s.stage}，学科=${s.subject}。\n教师已经录入的正式题目=${JSON.stringify(qs)}。\n${documentText ? `答卷文字（按附件顺序）：\n${documentText}\n` : "学生答卷页面已附在消息中。"}\n规则：1. 忠实识别学生实际填写内容；2. 只能按 questionId 对齐正式题目；3. 无法辨认写[无法辨认]且 confidence 低于0.5；4. 自动判断正误和得分；5. 错题必须生成分步解析、错误原因、订正答案，以及2道同知识点同题型但数值或情境不同的练习题；6. 每个正式题目恰好返回一项。\n只返回 JSON：{"ocrText":"完整识别原文","items":[{"questionId":"题目id","knowledgeId":"知识点id","studentAnswer":"学生答案","isCorrect":false,"score":0,"reason":"错误原因","correction":"正确答案","explanation":"分步题目解析","confidence":0.0,"practiceQuestions":[{"prompt":"同类题","answer":"答案","explanation":"解析"}]}]}`;
-    const parsed = await askModel(req.user.id, prompt, images, reservation);
+    const parsed = await recognizeSubmission(
+      s,
+      req.user.id,
+      reservation,
+      AbortSignal.timeout(120000),
+    );
     db.prepare(
       "UPDATE submissions SET status='review',teacher_reviewed=0,score=NULL,ocr_text=?,analysis_json=? WHERE id=?",
     ).run(parsed.ocrText || "", JSON.stringify(parsed), s.id);
@@ -1107,7 +1248,7 @@ app.post("/api/submissions/:id/review", auth, teacher, (req, res) => {
     )
     .get(req.params.id, req.user.id);
   if (!s) return res.status(404).json({ error: "提交不存在" });
-  if (recognitionJobs.has(s.id))
+  if (recognitionJobs.has(s.id) || recognitionQueue.active(s.id))
     return res.status(409).json({ error: "请等待识别完成后再复核" });
   const questions = db
     .prepare(
@@ -1152,6 +1293,27 @@ app.post("/api/submissions/:id/review", auth, teacher, (req, res) => {
       reviewed.score,
       s.id,
     );
+    const previousAnalysis = safeParse(s.analysis_json, {});
+    const previousItems = Array.isArray(previousAnalysis?.items)
+      ? previousAnalysis.items
+      : [];
+    auditReview(s, req.user.id, "review_saved", {
+      status: "completed",
+      reviewed: 1,
+      score: reviewed.score,
+      changes: reviewed.items.map((item) => {
+        const before = previousItems.find(
+          (previous) => previous?.questionId === item.questionId,
+        );
+        return {
+          questionId: item.questionId,
+          beforeScore: before?.score ?? null,
+          afterScore: item.score,
+          answerChanged: before?.studentAnswer !== item.studentAnswer,
+          verdictChanged: before?.isCorrect !== item.isCorrect,
+        };
+      }),
+    });
     db.exec("COMMIT");
     res.json({ ok: true });
   } catch (e) {
@@ -1775,3 +1937,5 @@ app.listen(port, host, () =>
     `Smart Campus ${APP_VERSION}: http://${shownHost}:${port}${host === "0.0.0.0" ? "（已监听全部网卡，可供局域网访问）" : ""}`,
   ),
 );
+
+recognitionQueue.start();

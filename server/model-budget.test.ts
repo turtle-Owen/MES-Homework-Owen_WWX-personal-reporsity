@@ -57,3 +57,23 @@ describe("model reservations across SQLite connections", () => {
     }
   });
 });
+
+it("limits total active model calls across independent schools", () => {
+  const db = new DatabaseSync(":memory:");
+  const previous = process.env.MODEL_GLOBAL_CONCURRENCY;
+  process.env.MODEL_GLOBAL_CONCURRENCY = "1";
+  try {
+    db.exec(
+      "CREATE TABLE users(id TEXT,school_id TEXT,role TEXT); INSERT INTO users VALUES('a','one','teacher'),('b','two','teacher'); CREATE TABLE model_usage(id TEXT PRIMARY KEY,user_id TEXT,school_id TEXT,created_at INTEGER,finished_at INTEGER,lease_until INTEGER)",
+    );
+    const reserve = createModelBudget(db);
+    const release = reserve("a");
+    expect(() => reserve("b")).toThrow(/正在进行/);
+    release();
+    reserve("b")();
+  } finally {
+    if (previous === undefined) delete process.env.MODEL_GLOBAL_CONCURRENCY;
+    else process.env.MODEL_GLOBAL_CONCURRENCY = previous;
+    db.close();
+  }
+});
