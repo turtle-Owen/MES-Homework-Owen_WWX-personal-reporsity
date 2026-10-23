@@ -1,6 +1,16 @@
 import express from "express";
+import { limitJsonBodies } from "./body-admission.mjs";
+import { requestJson, abortable, storageStatus } from "./io-guards.mjs";
+import { createResourcePressure } from "./resource-pressure.mjs";
+import { createUploadStorage } from "./upload-storage.mjs";
+import {
+  requestScope,
+  requestSignal,
+  cancelRequests,
+} from "./request-scope.mjs";
+import { createHttpServer, installLifecycle } from "./lifecycle.mjs";
 import { createCostBudget } from "./cost-budget.mjs";
-import { createUploadAdmission } from "./upload-admission.mjs";
+import { createUploadAdmission, positive } from "./upload-admission.mjs";
 import { registerTiledUploads } from "./tiled-uploads.mjs";
 import { createDeepSeekFiles } from "./deepseek-files.mjs";
 import { createRequestMetrics } from "./request-metrics.mjs";
@@ -13,6 +23,7 @@ import {
   randomBytes,
   randomUUID,
   scryptSync,
+  scrypt,
   timingSafeEqual,
   createCipheriv,
   createDecipheriv,
@@ -32,7 +43,6 @@ import {
   reasonTypeCatalog,
   safeParse,
 } from "./analysis.mjs";
-import readXlsxFile from "read-excel-file/node";
 import { createModelBudget, modelErrorStatus } from "./model-budget.mjs";
 import { teachingContent } from "./teaching-content.mjs";
 import {
@@ -110,12 +120,15 @@ if (
   db.exec(
     "ALTER TABLE teaching_analyses ADD COLUMN source_revision TEXT NOT NULL DEFAULT ''",
   );
-const reserveModel = createModelBudget(db);
+const pressure = createResourcePressure(data);
+await pressure.ready;
+const reserveModel = createModelBudget(db, { pressure });
 const costBudget = createCostBudget(db);
-const uploadAdmission = createUploadAdmission(db, data);
+const uploadAdmission = createUploadAdmission(db, data, { pressure });
 const app = express();
 const requestMetrics = createRequestMetrics();
 app.disable("x-powered-by");
+app.use("/api", requestScope);
 app.use("/api", (req, res, next) => {
   const started = performance.now();
   res.once("finish", () =>
@@ -135,6 +148,7 @@ if (process.env.TRUST_PROXY_HOPS) {
   const hops = Number(process.env.TRUST_PROXY_HOPS);
   if (Number.isSafeInteger(hops) && hops > 0) app.set("trust proxy", hops);
 }
+app.use(limitJsonBodies());
 app.use(express.json({ limit: "2mb" }));
 app.use(
   ["/api/auth/login", "/api/auth/register", "/api/schools/register"],
@@ -160,8 +174,22 @@ app.use("/api", (req, res, next) => {
     return res.status(400).json({ error: "请求须为 JSON 对象" });
   next();
 });
+const uploadStorage = createUploadStorage(db, files);
+app.use((req, res, next) => {
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    void uploadStorage
+      .cleanupRequest(req)
+      .catch(() => console.error("Upload cleanup pending retry"));
+  };
+  res.once("finish", cleanup);
+  res.once("close", cleanup);
+  next();
+});
 const upload = multer({
-  dest: files,
+  storage: uploadStorage,
   limits: { fileSize: 20 * 1024 * 1024, files: 10, fields: 20, parts: 30 },
   fileFilter: (_r, f, cb) =>
     cb(
@@ -176,8 +204,8 @@ const upload = multer({
       ].includes(f.mimetype),
     ),
 });
-const memoryUpload = multer({
-  storage: multer.memoryStorage(),
+const rosterUpload = multer({
+  storage: uploadStorage,
   limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 20, parts: 21 },
 });
 const uid = () => randomUUID(),
@@ -225,7 +253,7 @@ const teachingAuthor = (req, res, next) =>
   req.user.role === "teacher" && !req.user.is_school_admin
     ? next()
     : res.status(403).json({ error: "仅任课教师可执行教学分析操作" });
-registerTiledUploads(app, {
+const tiledUploads = registerTiledUploads(app, {
   db,
   auth,
   accessibleAssignment,
@@ -293,25 +321,20 @@ async function askModel(
   reservation = null,
   signal = null,
 ) {
-  signal ||= AbortSignal.timeout(120000);
+  signal = requestSignal(signal || AbortSignal.timeout(120000));
   signal.throwIfAborted();
   const { config } = providerFor(userId, { vision: images.length > 0 });
   const preset =
     Object.hasOwn(providers, config.provider) && providers[config.provider];
   if (!preset) throw new Error("模型厂商无效");
   const endpoint = providerEndpoint(config.endpoint, preset);
-  // Re-validate at request time: an approved domain's DNS may have been
-  // repointed at an internal address (SSRF / DNS rebinding) since it was saved.
-  await new Promise((resolve, reject) => {
-    const cancel = () => reject(signal.reason || new Error("模型请求已取消"));
-    signal.addEventListener("abort", cancel, { once: true });
-    assertPublicProviderEndpoint(endpoint)
-      .then(resolve, reject)
-      .finally(() => signal.removeEventListener("abort", cancel));
-  });
   const release = reservation || reserveModel(userId);
   let cost, remote;
   try {
+    // Reserve before DNS, image buffering, or outbound I/O. Revalidate DNS on
+    // every request while bounding its lifetime and concurrent lookups too.
+    await abortable(assertPublicProviderEndpoint(endpoint), signal);
+    pressure.assertMemory();
     cost = costBudget.reserve(userId, config, prompt, images.length);
     let imageBlocks;
     if (
@@ -324,20 +347,31 @@ async function askModel(
       imageBlocks = remote.blocks;
     } else {
       let bytes = 0;
-      imageBlocks = images.map((image) => {
+      imageBlocks = [];
+      for (const image of images) {
+        signal.throwIfAborted();
+        pressure.assertMemory();
+        if (!image.base64) {
+          const stat = await fs.promises.stat(image.filePath);
+          if (bytes + 4 * Math.ceil(stat.size / 3) > 44 * 1024 * 1024)
+            throw new Error("内联图片合计过大，请减少页数或启用 Files API");
+        }
         const base64 =
-          image.base64 || fs.readFileSync(image.filePath).toString("base64");
+          image.base64 ||
+          (await fs.promises.readFile(image.filePath, { signal })).toString(
+            "base64",
+          );
         bytes += base64.length;
         if (bytes > 44 * 1024 * 1024)
           throw new Error("内联图片合计过大，请减少页数或启用 Files API");
-        return {
+        imageBlocks.push({
           type: "image_url",
           image_url: {
             url: `data:${image.mimeType};base64,${base64}`,
             detail: "high",
           },
-        };
-      });
+        });
+      }
     }
     const content = [{ type: "text", text: prompt }];
     imageBlocks.forEach((block, index) => {
@@ -354,30 +388,44 @@ async function askModel(
     release.renew();
     signal.throwIfAborted();
     cost?.dispatch();
-    const rr = await fetch(endpoint, {
-      redirect: "error",
-      signal: AbortSignal.any([
-        AbortSignal.timeout(60000),
-        ...(signal ? [signal] : []),
-      ]),
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${decrypt(config.encrypted_key, config.iv)}`,
+    const { response: rr, body: raw } = await requestJson(
+      endpoint,
+      {
+        redirect: "error",
+        signal,
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${decrypt(config.encrypted_key, config.iv)}`,
+        },
+        body: JSON.stringify({
+          model: config.model,
+          response_format: { type: "json_object" },
+          temperature: 0,
+          max_tokens:
+            cost?.maxTokens ||
+            Math.min(positive("MODEL_MAX_OUTPUT_TOKENS", 8192), 32768),
+          messages: [
+            { role: "user", content: images.length ? content : prompt },
+          ],
+        }),
       },
-      body: JSON.stringify({
-        model: config.model,
-        response_format: { type: "json_object" },
-        temperature: 0,
-        ...(cost ? { max_tokens: cost.maxTokens } : {}),
-        messages: [{ role: "user", content: images.length ? content : prompt }],
-      }),
-    });
+      {
+        timeoutMs: Math.min(
+          positive("MODEL_REQUEST_TIMEOUT_MS", 60000),
+          120000,
+        ),
+        idleMs: Math.min(positive("MODEL_RESPONSE_IDLE_MS", 15000), 60000),
+        maxBytes: Math.min(
+          positive("MODEL_RESPONSE_MAX_BYTES", 2 * 1024 * 1024),
+          8 * 1024 * 1024,
+        ),
+      },
+    );
     if (!rr.ok)
       throw Object.assign(new Error(`模型接口请求失败 (${rr.status})`), {
         retryable: rr.status === 429 || rr.status >= 500,
       });
-    const raw = await rr.json();
     cost?.settle(raw.usage);
     const text = raw.choices?.[0]?.message?.content;
     if (!text) throw new Error("模型没有返回识别内容");
@@ -425,33 +473,6 @@ function makeSchoolAndTeacher(x) {
     db.exec("ROLLBACK");
     throw error;
   }
-}
-
-function parseCsv(text) {
-  const rows = [];
-  let row = [],
-    cell = "",
-    quoted = false;
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i];
-    if (char === '"' && quoted && text[i + 1] === '"') {
-      cell += '"';
-      i += 1;
-    } else if (char === '"') quoted = !quoted;
-    else if (char === "," && !quoted) {
-      row.push(cell);
-      cell = "";
-    } else if ((char === "\n" || char === "\r") && !quoted) {
-      if (char === "\r" && text[i + 1] === "\n") i += 1;
-      row.push(cell);
-      if (row.some((value) => value.trim())) rows.push(row);
-      row = [];
-      cell = "";
-    } else cell += char;
-  }
-  row.push(cell);
-  if (row.some((value) => value.trim())) rows.push(row);
-  return rows;
 }
 
 app.get("/api/health", (_q, r) =>
@@ -693,15 +714,24 @@ app.post(
   auth,
   schoolStaff,
   uploadAdmission.legacy,
-  memoryUpload.single("file"),
+  rosterUpload.single("file"),
   async (req, res) => {
     if (!req.file)
       return res.status(400).json({ error: "请选择 CSV 或 XLSX 文件" });
     try {
       const isCsv = req.file.originalname.toLowerCase().endsWith(".csv");
-      const table = isCsv
-        ? parseCsv(req.file.buffer.toString("utf8").replace(/^\uFEFF/, ""))
-        : await readXlsxFile(req.file.buffer);
+      pressure.assertMemory();
+      const signal = requestSignal();
+      const { table } = await recognitionFiles(
+        [
+          {
+            file_type: "application/x-mes-roster",
+            file_path: req.file.path,
+            isCsv,
+          },
+        ],
+        signal,
+      );
       const headers = (table[0] || []).map((value) =>
         String(value || "").trim(),
       );
@@ -725,7 +755,8 @@ app.post(
       const insert = db.prepare(
         "INSERT INTO users(id,school_id,role,name,email,password_hash,salt,stage,subject,class_name,created_at,is_school_admin) VALUES(?,?,?,?,?,?,?,?,?,?,?,0)",
       );
-      rows.forEach((row, index) => {
+      for (const [index, row] of rows.entries()) {
+        signal.throwIfAborted();
         const name = String(row["姓名"] || row.name || "").trim();
         const email = String(row["邮箱"] || row.email || "")
           .trim()
@@ -761,7 +792,11 @@ app.post(
             "student",
             name,
             email,
-            pass(initialPassword, salt),
+            await new Promise((resolve, reject) =>
+              scrypt(initialPassword, salt, 64, (error, key) =>
+                error ? reject(error) : resolve(key.toString("hex")),
+              ),
+            ),
             salt,
             stage,
             null,
@@ -779,7 +814,7 @@ app.post(
               : error.message,
           });
         }
-      });
+      }
       res.json({ total: rows.length, created, errors });
     } catch (error) {
       res.status(400).json({ error: `无法读取学生名单：${error.message}` });
@@ -831,9 +866,10 @@ app.post(
     try {
       providerFor(req.user.id);
       reservation = reserveModel(req.user.id);
+      const signal = requestSignal();
       const { images, documentText, warnings } = await recognitionFiles(
         [{ file_path: req.file.path, file_type: req.file.mimetype }],
-        AbortSignal.timeout(120000),
+        signal,
       );
       const word = isWordDocument(req.file.mimetype, req.file.originalname)
         ? { text: documentText, warnings }
@@ -844,7 +880,13 @@ app.post(
         )
         .all(req.user.school_id, req.user.stage, req.user.subject);
       const prompt = `你是学校作业数字化助手。请忠实解析这份教师上传的作业原件，并整理为可直接发布的草稿。\n教师设置：学段=${req.user.stage}，学科=${req.user.subject}，班级=${req.user.class_name}。\n${word ? `Word 文档已提取文字：\n${word.text}\n` : "图片/PDF 已按页面附在消息中。"}\n现有校本知识库=${JSON.stringify(knowledge)}。\n规则：1. 只能提取原件中实际出现的题目，按原顺序，不得补题或改题；2. 无法辨认的部分写[无法辨认]；3. 原件没有答案时，根据题目自行推导标准答案与简明评分要点，并在 answerGenerated 标记 true；4. 优先使用现有知识点；没有匹配项时生成一个符合该学段教材的简洁知识点名称，并在 knowledgeGenerated 标记 true；5. 原件未标分值时，根据题型和难度给出合理分值。\n只返回 JSON：{"title":"原件标题或文件名","questions":[{"prompt":"完整题干","standardAnswer":"答案与评分要点","score":10,"knowledgeTitle":"知识点","answerGenerated":true,"knowledgeGenerated":false}],"warnings":["确实需要教师注意的识别问题"]}`;
-      const parsed = await askModel(req.user.id, prompt, images, reservation);
+      const parsed = await askModel(
+        req.user.id,
+        prompt,
+        images,
+        reservation,
+        signal,
+      );
       if (!Array.isArray(parsed.questions) || !parsed.questions.length)
         throw new Error("未从文件中识别到题目，请检查图片清晰度或模型配置");
       const knowledgeMap = new Map(
@@ -893,7 +935,7 @@ app.post(
         .json({ error: error.message || "作业解析失败" });
     } finally {
       reservation?.();
-      if (req.file?.path) fs.rmSync(req.file.path, { force: true });
+      // The registered staging-file janitor also covers disconnect/error paths.
     }
   },
 );
@@ -1343,7 +1385,7 @@ app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
       s,
       req.user.id,
       reservation,
-      AbortSignal.timeout(120000),
+      requestSignal(),
     );
     db.prepare(
       "UPDATE submissions SET status='review',teacher_reviewed=0,score=NULL,ocr_text=?,analysis_json=? WHERE id=?",
@@ -2056,19 +2098,34 @@ if (fs.existsSync(path.join(root, "dist"))) {
     r.sendFile(path.join(root, "dist/index.html")),
   );
 }
-app.use((e, _q, r, _n) =>
-  r
-    .status(e.code === "LIMIT_FILE_SIZE" ? 413 : 400)
-    .json({ error: e.message || "请求失败" }),
-);
+app.use((e, _q, r, next) => {
+  if (r.headersSent) return next(e);
+  if (r.destroyed) return;
+  const diskStatus = storageStatus(e);
+  const status =
+    diskStatus || (e.code === "LIMIT_FILE_SIZE" ? 413 : e.status || 400);
+  if ([429, 503, 507].includes(status)) r.set("Retry-After", "5");
+  r.status(status).json({
+    error: diskStatus ? "存储暂不可用，请稍后重试" : e.message || "请求失败",
+  });
+});
 const port = Number(process.env.PORT || 8787);
 // 默认只监听本机；部署脚本在内网/隧道模式下通过 HOST=0.0.0.0 放开监听。
 const host = process.env.HOST || "127.0.0.1";
 const shownHost = host === "0.0.0.0" ? "127.0.0.1" : host;
-app.listen(port, host, () =>
+const server = createHttpServer(app);
+server.listen(port, host, () =>
   console.log(
     `Smart Campus ${APP_VERSION}: http://${shownHost}:${port}${host === "0.0.0.0" ? "（已监听全部网卡，可供局域网访问）" : ""}`,
   ),
 );
 
 recognitionQueue.start();
+installLifecycle(server, () => {
+  cancelRequests();
+  recognitionQueue.stop();
+  deepseekFiles.stop();
+  tiledUploads.stop();
+  uploadStorage.stop();
+  uploadAdmission.stop();
+});

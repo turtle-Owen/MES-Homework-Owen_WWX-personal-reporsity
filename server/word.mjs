@@ -19,6 +19,7 @@ export async function extractWordDocument(filePath, mimeType, fileName = "") {
   const isDocx = mimeType === DOCX || fileName.toLowerCase().endsWith(".docx");
   if (isDocx) {
     const images = [];
+    let encodedBytes = 0;
     const html = await mammoth.convertToHtml(
       { path: filePath },
       {
@@ -26,6 +27,9 @@ export async function extractWordDocument(filePath, mimeType, fileName = "") {
         convertImage: mammoth.images.imgElement(async (image) => {
           const buffer = await image.read();
           if (image.contentType?.startsWith("image/")) {
+            encodedBytes += 4 * Math.ceil(buffer.length / 3);
+            if (images.length >= 10 || encodedBytes > 44 * 1024 * 1024)
+              throw new Error("Word 图片数量或合计大小超限，请拆分文件");
             images.push({
               mimeType: image.contentType,
               base64: buffer.toString("base64"),

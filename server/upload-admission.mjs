@@ -1,16 +1,24 @@
-import fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import { createResourcePressure } from "./resource-pressure.mjs";
+import { watchUpload } from "./io-guards.mjs";
 export const uploadError = (message, status = 400) =>
   Object.assign(new Error(message), { status });
 export const positive = (name, fallback) => {
   const n = Number(process.env[name]);
   return Number.isSafeInteger(n) && n > 0 ? n : fallback;
 };
-export function createUploadAdmission(db, dataDir) {
+export function createUploadAdmission(
+  db,
+  dataDir,
+  { pressure = createResourcePressure(dataDir) } = {},
+) {
   const maxBytes = positive("UPLOAD_TOTAL_MB", 50) * 1024 * 1024;
   const globalScratch = positive("UPLOAD_SCRATCH_MB", 512) * 1024 * 1024;
   const schoolScratch = positive("UPLOAD_SCHOOL_SCRATCH_MB", 128) * 1024 * 1024;
-  const globalConcurrent = positive("UPLOAD_CONCURRENCY", 4);
+  const globalConcurrent = positive("UPLOAD_CONCURRENCY", 2);
+  const activeWriters = new Map();
+  const totalMs = Math.min(positive("UPLOAD_TIMEOUT_MS", 60000), 60000);
+  const idleMs = Math.min(positive("UPLOAD_IDLE_TIMEOUT_MS", 15000), totalMs);
   const ipWindows = new Map();
   function ipLimit(ip) {
     const time = Date.now(),
@@ -73,9 +81,7 @@ export function createUploadAdmission(db, dataDir) {
         usage.school_reserved + bytes > schoolScratch
       )
         throw uploadError("上传暂存空间繁忙，请稍后重试", 429);
-      const disk = fs.statfsSync(dataDir);
-      if (disk.bavail * disk.bsize < usage.reserved + bytes + 128 * 1024 * 1024)
-        throw uploadError("服务器可用空间不足，暂不能接收文件", 507);
+      pressure.assertUpload(usage.reserved + bytes);
       db.prepare(
         "INSERT INTO upload_sessions VALUES(?,?,?,?,?,'open',?,?,0,?,?,NULL)",
       ).run(
@@ -90,6 +96,7 @@ export function createUploadAdmission(db, dataDir) {
         time + ttl,
       );
       db.exec("COMMIT");
+      pressure.chargeDisk(bytes);
       return db.prepare("SELECT * FROM upload_sessions WHERE id=?").get(id);
     } catch (e) {
       db.exec("ROLLBACK");
@@ -102,7 +109,13 @@ export function createUploadAdmission(db, dataDir) {
     "CREATE TABLE IF NOT EXISTS upload_writers(id TEXT PRIMARY KEY,user_id TEXT,expires_at INTEGER NOT NULL)",
   );
   function acquire(user, ip) {
+    pressure.assertUpload();
     ipLimit(ip);
+    if (
+      activeWriters.size >= globalConcurrent ||
+      [...activeWriters.values()].includes(user.id)
+    )
+      throw uploadError("正在上传其他文件，请稍后重试", 429);
     const time = Date.now(),
       id = randomUUID();
     db.exec("BEGIN IMMEDIATE");
@@ -125,7 +138,14 @@ export function createUploadAdmission(db, dataDir) {
       db.exec("ROLLBACK");
       throw e;
     }
-    return () => db.prepare("DELETE FROM upload_writers WHERE id=?").run(id);
+    activeWriters.set(id, user.id);
+    return () => {
+      try {
+        db.prepare("DELETE FROM upload_writers WHERE id=?").run(id);
+      } finally {
+        activeWriters.delete(id);
+      }
+    };
   }
   function chargeTransfer(user, bytes, ownTransaction = true) {
     const time = Date.now();
@@ -189,27 +209,29 @@ export function createUploadAdmission(db, dataDir) {
         throw uploadError("上传大小无效或超过总大小上限", 413);
       session = reserve(req.user, { ttl: 90000, bytes: length });
       chargeTransfer(req.user, length);
-      let received = 0,
-        done = false;
-      const timer = setTimeout(() => req.destroy(), 60000);
-      const onData = (chunk) => {
-        received += chunk.length;
-        if (received > maxBytes) req.destroy();
-      };
-      req.on("data", onData);
+      let done = false;
+      const watch = watchUpload(req, { maxBytes: length, totalMs, idleMs });
+      req.uploadWatch = watch;
       const finish = () => {
         if (done) return;
         done = true;
-        clearTimeout(timer);
-        req.off("data", onData);
-        release();
-        db.prepare(
-          "UPDATE upload_sessions SET status=?,actual_bytes=? WHERE id=?",
-        ).run(
-          res.statusCode < 400 ? "complete" : "cancelled",
-          received,
-          session.id,
-        );
+        watch.stop();
+        // A hung kernel write must retain its local concurrency slot even if
+        // the DB lease expires. Do not admit replacement writers indefinitely.
+        void Promise.allSettled([...(req.uploadTasks || [])])
+          .then(() => {
+            release();
+            db.prepare(
+              "UPDATE upload_sessions SET status=?,actual_bytes=? WHERE id=?",
+            ).run(
+              req.complete && res.writableFinished && res.statusCode < 400
+                ? "complete"
+                : "cancelled",
+              watch.bytes,
+              session.id,
+            );
+          })
+          .catch(() => console.error("Upload lease cleanup failed"));
       };
       res.once("finish", finish);
       res.once("close", finish);
@@ -222,9 +244,20 @@ export function createUploadAdmission(db, dataDir) {
         ).run(session.id);
       res
         .set("Connection", "close")
+        .set("Retry-After", "5")
         .status(e.status || 400)
         .json({ error: e.message });
     }
   }
-  return { reserve, acquire, chargeTransfer, legacy, maxBytes };
+  return {
+    reserve,
+    acquire,
+    chargeTransfer,
+    legacy,
+    maxBytes,
+    totalMs,
+    idleMs,
+    ready: pressure.ready,
+    stop: () => pressure.stop(),
+  };
 }

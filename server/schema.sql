@@ -98,3 +98,5 @@ CREATE INDEX IF NOT EXISTS idx_upload_attempt_time ON upload_attempts(created_at
 CREATE INDEX IF NOT EXISTS idx_upload_session_expiry ON upload_sessions(status,expires_at);
 CREATE TABLE IF NOT EXISTS recognition_sources(job_id TEXT PRIMARY KEY,snapshot_json TEXT NOT NULL,FOREIGN KEY(job_id) REFERENCES recognition_jobs(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS system_flags(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+-- Only immutable staging paths, registered before opening; never submission paths.
+CREATE TABLE IF NOT EXISTS upload_temporary_files(file_path TEXT PRIMARY KEY,expires_at INTEGER NOT NULL);

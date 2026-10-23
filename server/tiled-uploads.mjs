@@ -1,5 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
+import { Transform } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { watchUpload, storageStatus } from "./io-guards.mjs";
 import { randomUUID, createHash } from "node:crypto";
 import { tilePlan } from "../shared/tile-plan.mjs";
 import { imageHeader } from "./image-header.mjs";
@@ -238,38 +241,36 @@ export function registerTiledUploads(
         db.exec("ROLLBACK");
         throw e;
       }
-      const handle = await fs.promises.open(temp, "wx", 0o600);
       const hash = createHash("sha256"),
         header = [];
       let total = 0,
         headerBytes = 0;
-      const timer = setTimeout(() => req.destroy(), 60000);
-      try {
-        for await (const chunk of req) {
+      const inspect = new Transform({
+        transform(chunk, _encoding, cb) {
           total += chunk.length;
           if (total > length || total > part.maxBytes)
-            throw uploadError("文件实际大小超限", 413);
+            return cb(uploadError("文件实际大小超限", 413));
           hash.update(chunk);
           if (headerBytes < 65536) {
-            const b = chunk.subarray(0, 65536 - headerBytes);
+            const b = Buffer.from(chunk.subarray(0, 65536 - headerBytes));
             header.push(b);
             headerBytes += b.length;
           }
-          // FileHandle.write may write fewer bytes than requested.
-          let offset = 0;
-          while (offset < chunk.length) {
-            const written = await handle.write(
-              chunk,
-              offset,
-              chunk.length - offset,
-            );
-            if (!written.bytesWritten) throw new Error("文件写入失败");
-            offset += written.bytesWritten;
-          }
-        }
+          cb(null, chunk);
+        },
+      });
+      const output = fs.createWriteStream(temp, { flags: "wx", mode: 0o600 });
+      const closed = new Promise((resolve) => output.once("close", resolve));
+      const watch = watchUpload(req, {
+        maxBytes: length,
+        totalMs: admission.totalMs,
+        idleMs: admission.idleMs,
+      });
+      try {
+        await pipeline(req, inspect, output, { signal: watch.signal });
       } finally {
-        clearTimeout(timer);
-        await handle.close();
+        watch.stop();
+        await closed;
       }
       if (
         (declaredLength !== undefined && total !== length) ||
@@ -307,15 +308,23 @@ export function registerTiledUploads(
       temp = null;
       res.json({ ok: true });
     } catch (e) {
-      if (temp) fs.rmSync(temp, { force: true });
-      if (token && session)
+      let removed = true;
+      if (temp) {
+        try {
+          await fs.promises.rm(temp, { force: true });
+        } catch {
+          removed = false;
+        } // Keep the registered path for janitor retry.
+      }
+      if (token && session && removed)
         db.prepare(
           "UPDATE upload_parts SET status='empty',file_path=NULL,bytes=NULL,token=NULL,lease_until=NULL WHERE session_id=? AND index_no=? AND token=?",
         ).run(session.id, index, token);
       if (!res.destroyed)
         res
           .set("Connection", "close")
-          .status(e.status || 400)
+          .set("Retry-After", "5")
+          .status(storageStatus(e) || e.status || 400)
           .json({ error: e.status ? e.message : "上传失败，请重试" });
     } finally {
       release?.();
@@ -409,39 +418,48 @@ export function registerTiledUploads(
     }
   });
   // Bounded cleanup. Only paths created by this module are eligible for removal.
-  function clean() {
-    const time = Date.now();
-    db.prepare(
-      "UPDATE upload_sessions SET status='expired' WHERE status='open' AND expires_at<=?",
-    ).run(time);
-    db.prepare(
-      "DELETE FROM upload_sessions WHERE status IN('complete','cancelled','expired') AND created_at<? AND NOT EXISTS(SELECT 1 FROM upload_parts WHERE session_id=upload_sessions.id)",
-    ).run(time - 7 * 86400000);
-    const stale = db
-      .prepare(
-        `SELECT p.* FROM upload_parts p JOIN upload_sessions s ON s.id=p.session_id
+  let cleaning = false;
+  async function clean() {
+    if (cleaning) return;
+    cleaning = true;
+    try {
+      const time = Date.now();
+      db.prepare(
+        "UPDATE upload_sessions SET status='expired' WHERE status='open' AND expires_at<=?",
+      ).run(time);
+      db.prepare(
+        "DELETE FROM upload_sessions WHERE status IN('complete','cancelled','expired') AND created_at<? AND NOT EXISTS(SELECT 1 FROM upload_parts WHERE session_id=upload_sessions.id)",
+      ).run(time - 7 * 86400000);
+      const stale = db
+        .prepare(
+          `SELECT p.* FROM upload_parts p JOIN upload_sessions s ON s.id=p.session_id
       WHERE s.status IN('expired','cancelled') OR p.status='receiving' AND p.lease_until<=? LIMIT 50`,
-      )
-      .all(time);
-    for (const p of stale) {
-      if (p.file_path && path.dirname(p.file_path) === files)
-        fs.rmSync(p.file_path, { force: true });
-      db.prepare(
-        "UPDATE upload_parts SET status='empty',file_path=NULL,bytes=NULL,token=NULL,lease_until=NULL WHERE session_id=? AND index_no=? AND status=? AND token IS ?",
-      ).run(p.session_id, p.index_no, p.status, p.token);
-      db.prepare(
-        "DELETE FROM upload_parts WHERE session_id=? AND index_no=? AND EXISTS(SELECT 1 FROM upload_sessions WHERE id=? AND status IN('expired','cancelled'))",
-      ).run(p.session_id, p.index_no, p.session_id);
+        )
+        .all(time);
+      for (const p of stale) {
+        if (p.file_path && path.dirname(p.file_path) === files)
+          await fs.promises.rm(p.file_path, { force: true });
+        db.prepare(
+          "UPDATE upload_parts SET status='empty',file_path=NULL,bytes=NULL,token=NULL,lease_until=NULL WHERE session_id=? AND index_no=? AND status=? AND token IS ?",
+        ).run(p.session_id, p.index_no, p.status, p.token);
+        db.prepare(
+          "DELETE FROM upload_parts WHERE session_id=? AND index_no=? AND EXISTS(SELECT 1 FROM upload_sessions WHERE id=? AND status IN('expired','cancelled'))",
+        ).run(p.session_id, p.index_no, p.session_id);
+      }
+    } finally {
+      cleaning = false;
     }
   }
-  const timer = setInterval(() => {
-    try {
-      clean();
-    } catch {
-      console.error("Upload cleanup failed");
-    }
-  }, 30000);
+  const timer = setInterval(
+    () => void clean().catch(() => console.error("Upload cleanup failed")),
+    30000,
+  );
   timer.unref();
-  clean();
-  return { clean };
+  void clean().catch(() => console.error("Upload cleanup failed"));
+  return {
+    clean,
+    stop() {
+      clearInterval(timer);
+    },
+  };
 }

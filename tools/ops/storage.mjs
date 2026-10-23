@@ -206,6 +206,14 @@ export function restoreBackup(source, destination) {
           .get()
       )
         db.exec("DELETE FROM upload_writers");
+      if (
+        db
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE name='upload_temporary_files'",
+          )
+          .get()
+      )
+        db.exec("DELETE FROM upload_temporary_files");
     }
     if (
       db
