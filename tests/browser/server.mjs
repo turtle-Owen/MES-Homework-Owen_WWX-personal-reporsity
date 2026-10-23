@@ -1,5 +1,15 @@
 // Isolated fixture server. Never import this entrypoint in production.
 import fs from "node:fs";
+import dns from "node:dns";
+// All model traffic is synthetic, including endpoint DNS checks.
+dns.promises.lookup = async () => [{ address: "1.1.1.1", family: 4 }];
+process.env.CLIENT_TILING_ENABLED = "1";
+process.env.DEEPSEEK_FILES_ENABLED = "0";
+process.env.MODEL_SCHOOL_DAILY_MICRO_CNY = "1000000000";
+process.env.MODEL_USER_DAILY_MICRO_CNY = "1000000000";
+process.env.MODEL_COST_RATES_JSON = JSON.stringify({
+  "openai/gpt-4.1-mini": { input: 1000000, output: 2000000, imageTokens: 4096 },
+});
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

@@ -28,6 +28,13 @@ function references(db) {
   return [
     ...db.prepare("SELECT file_path FROM submissions").all(),
     ...db.prepare("SELECT file_path FROM submission_files").all(),
+    ...(db
+      .prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='submission_tiles'",
+      )
+      .get()
+      ? db.prepare("SELECT file_path FROM submission_tiles").all()
+      : []),
   ];
 }
 function safeFile(root, relative) {
@@ -167,7 +174,15 @@ export function restoreBackup(source, destination) {
         .join("/");
       if (!relative.startsWith("uploads/") || !manifest.files[relative])
         throw new Error("附件备份不完整");
-      for (const table of ["submissions", "submission_files"])
+      for (const table of [
+        "submissions",
+        "submission_files",
+        ...(db
+          .prepare("SELECT 1 FROM sqlite_master WHERE name='submission_tiles'")
+          .get()
+          ? ["submission_tiles"]
+          : []),
+      ])
         db.prepare(`UPDATE ${table} SET file_path=? WHERE file_path=?`).run(
           path.join(destination, relative),
           row.file_path,
@@ -176,6 +191,33 @@ export function restoreBackup(source, destination) {
     // Sessions from a backup must never become valid again; old leases cannot survive restoration.
     db.exec(
       "DELETE FROM sessions; UPDATE model_usage SET finished_at=COALESCE(finished_at,0),lease_until=0; UPDATE recognition_jobs SET lease_until=0 WHERE status='running'; COMMIT",
+    );
+    if (
+      db
+        .prepare("SELECT 1 FROM sqlite_master WHERE name='upload_sessions'")
+        .get()
+    ) {
+      db.exec(
+        "UPDATE upload_sessions SET status='cancelled' WHERE status='open'; DELETE FROM upload_parts",
+      );
+      if (
+        db
+          .prepare("SELECT 1 FROM sqlite_master WHERE name='upload_writers'")
+          .get()
+      )
+        db.exec("DELETE FROM upload_writers");
+    }
+    if (
+      db
+        .prepare("SELECT 1 FROM sqlite_master WHERE name='provider_files'")
+        .get()
+    ) {
+      db.exec(
+        "UPDATE provider_files SET status='cleanup',cleanup_after=0 WHERE remote_id IS NOT NULL AND status NOT IN('deleted','expired')",
+      );
+    }
+    db.exec(
+      "CREATE TABLE IF NOT EXISTS system_flags(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT OR REPLACE INTO system_flags VALUES('restored_budget_review','1')",
     );
     checkDatabase(db);
     db.close();
@@ -205,7 +247,7 @@ if (
     console.log(
       command === "backup"
         ? "备份完成，已校验数据库与附件"
-        : "恢复完成；请使用原 APP_SECRET 并检查后启动服务",
+        : "恢复完成；使用原 APP_SECRET。启用金额预算时，模型调用需先对账确认",
     );
   } catch (e) {
     console.error(e.message);

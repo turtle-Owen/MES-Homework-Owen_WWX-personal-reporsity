@@ -1,4 +1,8 @@
 import express from "express";
+import { createCostBudget } from "./cost-budget.mjs";
+import { createUploadAdmission } from "./upload-admission.mjs";
+import { registerTiledUploads } from "./tiled-uploads.mjs";
+import { createDeepSeekFiles } from "./deepseek-files.mjs";
 import { createRequestMetrics } from "./request-metrics.mjs";
 import { createRecognitionQueue, publicJob } from "./recognition-queue.mjs";
 import { recognitionFiles } from "./recognition-files.mjs";
@@ -107,6 +111,8 @@ if (
     "ALTER TABLE teaching_analyses ADD COLUMN source_revision TEXT NOT NULL DEFAULT ''",
   );
 const reserveModel = createModelBudget(db);
+const costBudget = createCostBudget(db);
+const uploadAdmission = createUploadAdmission(db, data);
 const app = express();
 const requestMetrics = createRequestMetrics();
 app.disable("x-powered-by");
@@ -135,6 +141,11 @@ app.use(
   authRateLimit(),
 );
 app.use("/api", (req, res, next) => {
+  if (
+    req.method === "PUT" &&
+    /^\/upload-sessions\/[^/]+\/parts\/[^/]+$/.test(req.path)
+  )
+    return next();
   if (
     !req.body &&
     !req.get("content-type") &&
@@ -214,6 +225,16 @@ const teachingAuthor = (req, res, next) =>
   req.user.role === "teacher" && !req.user.is_school_admin
     ? next()
     : res.status(403).json({ error: "仅任课教师可执行教学分析操作" });
+registerTiledUploads(app, {
+  db,
+  auth,
+  accessibleAssignment,
+  files,
+  data,
+  admission: uploadAdmission,
+  costBudget,
+});
+const deepseekFiles = createDeepSeekFiles(db, { decrypt });
 function setSession(res, userId) {
   const sid = randomBytes(32).toString("hex");
   db.prepare("INSERT INTO sessions VALUES(?,?,?)").run(
@@ -272,31 +293,67 @@ async function askModel(
   reservation = null,
   signal = null,
 ) {
+  signal ||= AbortSignal.timeout(120000);
+  signal.throwIfAborted();
   const { config } = providerFor(userId, { vision: images.length > 0 });
-  const content = [{ type: "text", text: prompt }];
-  images.forEach((image, index) => {
-    content.push({
-      type: "text",
-      text: `第 ${index + 1} 页：`,
-    });
-    content.push({
-      type: "image_url",
-      image_url: {
-        url: `data:${image.mimeType};base64,${image.base64}`,
-        detail: "high",
-      },
-    });
-  });
   const preset =
     Object.hasOwn(providers, config.provider) && providers[config.provider];
   if (!preset) throw new Error("模型厂商无效");
   const endpoint = providerEndpoint(config.endpoint, preset);
   // Re-validate at request time: an approved domain's DNS may have been
   // repointed at an internal address (SSRF / DNS rebinding) since it was saved.
-  await assertPublicProviderEndpoint(endpoint);
+  await new Promise((resolve, reject) => {
+    const cancel = () => reject(signal.reason || new Error("模型请求已取消"));
+    signal.addEventListener("abort", cancel, { once: true });
+    assertPublicProviderEndpoint(endpoint)
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", cancel));
+  });
   const release = reservation || reserveModel(userId);
+  let cost, remote;
   try {
+    cost = costBudget.reserve(userId, config, prompt, images.length);
+    let imageBlocks;
+    if (
+      images.length &&
+      config.provider === "deepseek" &&
+      process.env.DEEPSEEK_FILES_ENABLED === "1"
+    ) {
+      if (!costBudget.enabled) throw new Error("Files API 需要先配置费用预算");
+      remote = await deepseekFiles.prepare(images, config, signal);
+      imageBlocks = remote.blocks;
+    } else {
+      let bytes = 0;
+      imageBlocks = images.map((image) => {
+        const base64 =
+          image.base64 || fs.readFileSync(image.filePath).toString("base64");
+        bytes += base64.length;
+        if (bytes > 44 * 1024 * 1024)
+          throw new Error("内联图片合计过大，请减少页数或启用 Files API");
+        return {
+          type: "image_url",
+          image_url: {
+            url: `data:${image.mimeType};base64,${base64}`,
+            detail: "high",
+          },
+        };
+      });
+    }
+    const content = [{ type: "text", text: prompt }];
+    imageBlocks.forEach((block, index) => {
+      const image = images[index];
+      content.push({
+        type: "text",
+        text:
+          image.page === undefined
+            ? `第 ${index + 1} 页：`
+            : `第 ${image.page + 1} 页，区域(${image.x},${image.y},${image.width},${image.height})。与相邻块有重叠，同一题只返回一次，不得重复计分。`,
+      });
+      content.push(block);
+    });
     release.renew();
+    signal.throwIfAborted();
+    cost?.dispatch();
     const rr = await fetch(endpoint, {
       redirect: "error",
       signal: AbortSignal.any([
@@ -312,6 +369,7 @@ async function askModel(
         model: config.model,
         response_format: { type: "json_object" },
         temperature: 0,
+        ...(cost ? { max_tokens: cost.maxTokens } : {}),
         messages: [{ role: "user", content: images.length ? content : prompt }],
       }),
     });
@@ -320,10 +378,13 @@ async function askModel(
         retryable: rr.status === 429 || rr.status >= 500,
       });
     const raw = await rr.json();
+    cost?.settle(raw.usage);
     const text = raw.choices?.[0]?.message?.content;
     if (!text) throw new Error("模型没有返回识别内容");
     return cleanModelJson(text);
   } finally {
+    remote?.release();
+    cost?.close();
     release();
   }
 }
@@ -631,6 +692,7 @@ app.post(
   "/api/students/import",
   auth,
   schoolStaff,
+  uploadAdmission.legacy,
   memoryUpload.single("file"),
   async (req, res) => {
     if (!req.file)
@@ -757,6 +819,7 @@ app.post(
   "/api/assignments/import",
   auth,
   teacher,
+  uploadAdmission.legacy,
   upload.single("file"),
   validateUploads,
   async (req, res) => {
@@ -980,6 +1043,7 @@ app.post(
     req.assignment = a;
     next();
   },
+  uploadAdmission.legacy,
   upload.array("files", 10),
   validateUploads,
   (req, res) => {
@@ -1131,13 +1195,38 @@ async function recognizeSubmission(
       "SELECT q.*,k.title knowledge_title FROM questions q LEFT JOIN knowledge k ON k.id=q.knowledge_id WHERE assignment_id=? ORDER BY number",
     )
     .all(s.assignment_id);
-  const { images, documentText } = await recognitionFiles(
-    submissionFiles(s),
-    signal,
-  );
+  const tiles = db
+    .prepare(
+      "SELECT * FROM submission_tiles WHERE submission_id=? ORDER BY position",
+    )
+    .all(s.id);
+  const { images, documentText } = tiles.length
+    ? {
+        images: tiles.map((tile) => ({
+          filePath: tile.file_path,
+          mimeType: tile.file_type,
+          page: tile.page_no,
+          x: tile.x,
+          y: tile.y,
+          width: tile.width,
+          height: tile.height,
+        })),
+        documentText: "",
+      }
+    : await recognitionFiles(submissionFiles(s), signal);
   assertLease();
   const prompt = `学校作业 OCR、自动批改与个性化练习。学段=${s.stage}，学科=${s.subject}。\n教师已经录入的正式题目=${JSON.stringify(qs)}。\n${documentText ? `答卷文字（按附件顺序）：\n${documentText}\n` : "学生答卷页面已附在消息中。"}\n规则：1. 忠实识别学生实际填写内容；2. 只能按 questionId 对齐正式题目；3. 无法辨认写[无法辨认]且 confidence 低于0.5；4. 自动判断正误和得分；5. 错题必须生成分步解析、错误原因、订正答案，以及2道同知识点同题型但数值或情境不同的练习题；6. 每个正式题目恰好返回一项。\n只返回 JSON：{"ocrText":"完整识别原文","items":[{"questionId":"题目id","knowledgeId":"知识点id","studentAnswer":"学生答案","isCorrect":false,"score":0,"reason":"错误原因","correction":"正确答案","explanation":"分步题目解析","confidence":0.0,"practiceQuestions":[{"prompt":"同类题","answer":"答案","explanation":"解析"}]}]}`;
   const parsed = await askModel(userId, prompt, images, reservation, signal);
+  if (tiles.length) {
+    if (
+      !Array.isArray(parsed?.items) ||
+      parsed.items.length !== qs.length ||
+      new Set(parsed.items.map((item) => item?.questionId)).size !==
+        qs.length ||
+      qs.some((q) => !parsed.items.some((item) => item?.questionId === q.id))
+    )
+      throw new Error("切片识别题号缺失或重复，请重新识别或由教师检查原件");
+  }
   return parsed;
 }
 const recognitionJobs = new Set();
@@ -1223,6 +1312,7 @@ app.get("/api/operations", auth, schoolAdmin, (req, res) => {
     modelUsage: usage,
     uptimeSeconds: Math.floor(process.uptime()),
     requestsLast15Minutes: requestMetrics.snapshot(req.user.school_id),
+    costBudget: costBudget.summary(req.user.school_id),
   });
 });
 app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
@@ -1260,8 +1350,16 @@ app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {
     ).run(parsed.ocrText || "", JSON.stringify(parsed), s.id);
     res.json(parsed);
   } catch (e) {
-    if (started)
-      db.prepare("UPDATE submissions SET status='failed' WHERE id=?").run(s.id);
+    if (started) {
+      if (e.code === "MODEL_QUOTA")
+        db.prepare(
+          "UPDATE submissions SET status=?,teacher_reviewed=?,score=? WHERE id=?",
+        ).run(s.status, s.teacher_reviewed, s.score, s.id);
+      else
+        db.prepare("UPDATE submissions SET status='failed' WHERE id=?").run(
+          s.id,
+        );
+    }
     res.status(modelErrorStatus(e)).json({ error: String(e.message || e) });
   } finally {
     reservation?.();

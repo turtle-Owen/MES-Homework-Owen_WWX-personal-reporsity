@@ -309,3 +309,79 @@ test("school administrators can inspect their queue and usage without teaching c
     fullPage: true,
   });
 });
+
+test("device-side overlapping tiles resume after interruption and preserve original review", async ({
+  page,
+}) => {
+  const { createCanvas } = await import("@napi-rs/canvas");
+  const canvas = createCanvas(1800, 1200);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "white";
+  context.fillRect(0, 0, 1800, 1200);
+  context.fillStyle = "black";
+  context.font = "40px sans-serif";
+  context.fillText("1 + 1 = 2", 40, 80);
+  await login(page);
+  await configure(page);
+  const a = (await assignments(page)).find((x) => x.title === "浏览器作业 A");
+  const student = (await (await page.request.get("/api/students")).json()).find(
+    (x) => x.email === "lin@fixture.test",
+  );
+  await page.getByRole("button", { name: "作业与上传", exact: true }).click();
+  await page.getByLabel("对应的正式作业").selectOption(a.id);
+  await page.getByLabel("关联学生账户").selectOption(student.id);
+  await page.getByLabel(/在设备上切分照片/).check();
+  await page
+    .locator(".upload-box input[type=file]")
+    .setInputFiles({
+      name: "full-page.jpg",
+      mimeType: "image/jpeg",
+      buffer: canvas.toBuffer("image/jpeg"),
+    });
+  let originals = 0;
+  page.on("request", (request) => {
+    if (/\/upload-sessions\/[^/]+\/parts\/0$/.test(request.url())) originals++;
+  });
+  await page.route("**/api/upload-sessions/*/parts/1", (route) =>
+    route.abort("failed"),
+  );
+  await page
+    .getByRole("button", { name: "保存并进入识别队列", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "重试未完成的上传", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "取消本次上传", exact: true }),
+  ).toBeVisible();
+  await page.unroute("**/api/upload-sessions/*/parts/1");
+  const finalized = page.waitForResponse((r) =>
+    /\/upload-sessions\/[^/]+\/finalize$/.test(r.url()),
+  );
+  await page
+    .getByRole("button", { name: "重试未完成的上传", exact: true })
+    .click();
+  const response = await finalized;
+  expect(response.status()).toBe(200);
+  const { id } = await response.json();
+  expect(originals).toBe(1);
+  const detail = await (
+    await page.request.get(`/api/submissions/${id}`)
+  ).json();
+  expect(detail.files).toHaveLength(1);
+  expect(detail.files[0].name).toBe("full-page.jpg");
+  await page.getByRole("button", { name: "识别与复核", exact: true }).click();
+  await page
+    .locator(".select-list button")
+    .filter({ hasText: "林一" })
+    .filter({ hasText: "等待识别" })
+    .first()
+    .click();
+  await expect(page.locator(".review-detail a")).toHaveCount(1);
+  await page.getByRole("button", { name: "开始 OCR", exact: true }).click();
+  await expect(page.locator("fieldset.review-item")).toHaveCount(8);
+  await page.screenshot({
+    path: "test-results/device-tiling-review.png",
+    fullPage: true,
+  });
+});

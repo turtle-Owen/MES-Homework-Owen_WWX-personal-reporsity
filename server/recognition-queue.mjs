@@ -59,6 +59,14 @@ export function createRecognitionQueue(
         (id,submission_id,user_id,school_id,available_at,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?)`,
       ).run(id, submission.id, user.id, user.school_id, time, time, time);
+      db.prepare("INSERT INTO recognition_sources VALUES(?,?)").run(
+        id,
+        JSON.stringify({
+          status: submission.status,
+          teacher_reviewed: submission.teacher_reviewed,
+          score: submission.score,
+        }),
+      );
       db.prepare(
         "UPDATE submissions SET status='queued',teacher_reviewed=0,score=NULL WHERE id=?",
       ).run(submission.id);
@@ -107,6 +115,10 @@ export function createRecognitionQueue(
           status,
           job.submission_id,
         );
+        if (status === "failed")
+          db.prepare("DELETE FROM recognition_sources WHERE job_id=?").run(
+            job.id,
+          );
       }
       db.exec("COMMIT");
     } catch (e) {
@@ -179,6 +191,9 @@ export function createRecognitionQueue(
         db.prepare(
           "UPDATE recognition_jobs SET status='succeeded',token=NULL,lease_until=NULL,error=NULL,error_status=NULL,updated_at=? WHERE id=?",
         ).run(now(), job.id);
+        db.prepare("DELETE FROM recognition_sources WHERE job_id=?").run(
+          job.id,
+        );
         db.exec("COMMIT");
       } catch (e) {
         db.exec("ROLLBACK");
@@ -207,10 +222,36 @@ export function createRecognitionQueue(
           now(),
           job.id,
         );
-        db.prepare("UPDATE submissions SET status=? WHERE id=?").run(
-          status,
-          job.submission_id,
-        );
+        const source =
+          e.code === "MODEL_QUOTA" &&
+          db
+            .prepare(
+              "SELECT snapshot_json FROM recognition_sources WHERE job_id=?",
+            )
+            .get(job.id);
+        if (source) {
+          const previous = JSON.parse(source.snapshot_json);
+          db.prepare(
+            "UPDATE submissions SET status=?,teacher_reviewed=?,score=? WHERE id=?",
+          ).run(
+            previous.status,
+            previous.teacher_reviewed,
+            previous.score,
+            job.submission_id,
+          );
+          db.prepare("UPDATE recognition_jobs SET error=? WHERE id=?").run(
+            "模型额度或费用预算不足，已保留原复核状态",
+            job.id,
+          );
+        } else
+          db.prepare("UPDATE submissions SET status=? WHERE id=?").run(
+            status,
+            job.submission_id,
+          );
+        if (status === "failed")
+          db.prepare("DELETE FROM recognition_sources WHERE job_id=?").run(
+            job.id,
+          );
         db.exec("COMMIT");
       } catch (error) {
         db.exec("ROLLBACK");

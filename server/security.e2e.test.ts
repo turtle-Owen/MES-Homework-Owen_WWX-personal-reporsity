@@ -116,6 +116,9 @@ beforeAll(async () => {
   fs.writeFileSync(
     preload,
     `import fs from "node:fs";
+    import dns from "node:dns";
+    // Fixture model traffic is mocked; DNS must also stay deterministic and offline.
+    dns.promises.lookup=async()=>[{address:"1.1.1.1",family:4}];
     globalThis.fetch = async (_url, options) => {
       fs.writeFileSync(${JSON.stringify(path.join(dir, "model-request.json"))}, options.body);
       const configFile=${JSON.stringify(path.join(dir, "model-response.json"))};
@@ -132,6 +135,10 @@ beforeAll(async () => {
       PORT: String(port),
       HOST: "127.0.0.1",
       NODE_ENV: "test",
+      CLIENT_TILING_ENABLED: "0",
+      DEEPSEEK_FILES_ENABLED: "0",
+      MODEL_SCHOOL_DAILY_MICRO_CNY: "0",
+      MODEL_USER_DAILY_MICRO_CNY: "0",
       APP_SECRET: "security-test-only-32-character-secret",
     },
     stdio: "ignore",
@@ -240,12 +247,10 @@ describe("HTTP authorization regressions (isolated SQLite; no model requests)", 
     ).toBe(403);
     expect(
       (
-        await request(
-          "/api/me",
-          student,
-          "PATCH",
-          { name: "新姓名", subject: "物理" },
-        )
+        await request("/api/me", student, "PATCH", {
+          name: "新姓名",
+          subject: "物理",
+        })
       ).status,
     ).toBe(403);
     expect(
