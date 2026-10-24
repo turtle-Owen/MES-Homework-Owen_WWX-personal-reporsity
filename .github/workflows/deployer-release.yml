@@ -236,6 +236,50 @@ jobs:
             release/mes-homework-app-${{ matrix.platform }}-${{ matrix.arch }}.zip
             release/mes-homework-app-${{ matrix.platform }}-${{ matrix.arch }}.zip.meta.json
 
+  publish-draft:
+    name: Publish draft pre-release (feature branch)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/261024DSH02'
+    needs:
+      - deployer-windows
+      - deployer-linux-x64
+      - deployer-linux-arm64
+      - deployer-linux-x86
+      - deployer-macos-arm64
+      - app-bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release
+          merge-multiple: true
+      - name: Build manifest and checksums
+        run: |
+          node tools/deployer/packaging/build-manifest.mjs --dir release \
+            --version "${DEPLOYER_VERSION}" --build "${DEPLOYER_BUILD}"
+          rm -f release/*.meta.json release/*.sha256
+          chmod +x release/mes-deployer-linux-* release/mes-deployer-macos-* || true
+          ls -la release
+      - name: Create or update draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "${DEPLOYER_VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${DEPLOYER_VERSION}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft --prerelease \
+              --target "${GITHUB_SHA}" \
+              --title "桌面版无依赖一键部署器 ${DEPLOYER_VERSION} (build ${DEPLOYER_BUILD})" \
+              --notes-file docs/releases/v0.2.1-rc3.md
+          fi
+          gh release upload "${DEPLOYER_VERSION}" release/* \
+            --repo "${GITHUB_REPOSITORY}" --clobber
+      - name: Verify release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "${DEPLOYER_VERSION}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name'
+
   release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
