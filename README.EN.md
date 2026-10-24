@@ -144,7 +144,7 @@ Model capabilities and API formats change over time. Current OCR uses OpenAI-com
 
 ## Safety
 
-This project was developed with the assistance of **DeepSeek V4.1-Flash** and **Qwen 3.8 Max** (running on DeepSeek Harness), as well as **GPT 6 Sol** (running on Codex). All AI-generated output has been reviewed, verified, and integrated by the developer, who retains full authorship of and responsibility for the final codebase and documentation.
+This project is assisted by DeepSeek V4.1-Flash and Qwen 3.8 Max (running on DeepSeek Harness) and GPT 6 Sol (running on Codex). All AI-generated output has not been carefully reviewed by the developers, who are not responsible for the final code base and documentation.
 
 See [SAFETY.md](SAFETY.md) ([中文](SAFETY.zh.md)) for detailed safety information, responsible use guidelines, and data privacy considerations.
 
