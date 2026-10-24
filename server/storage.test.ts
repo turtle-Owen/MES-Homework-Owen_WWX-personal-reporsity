@@ -19,6 +19,20 @@ it("backs up real SQLite and files, restores relocated paths and refuses corrupt
     db.prepare("UPDATE submissions SET file_path=?").run(
       path.join(source, "uploads", "a.png"),
     );
+    const first = db.prepare("SELECT id FROM submissions LIMIT 1").get()!;
+    fs.writeFileSync(
+      path.join(source, "uploads", "tile.jpg"),
+      "synthetic tile",
+    );
+    db.prepare(
+      "INSERT INTO submission_tiles VALUES(?,0,0,0,0,100,100,?,'image/jpeg')",
+    ).run(first.id, path.join(source, "uploads", "tile.jpg"));
+    db.prepare(
+      "INSERT INTO upload_sessions VALUES('incomplete','u','s',NULL,NULL,'open','[]',100,0,1,9999999999999,NULL)",
+    ).run();
+    db.prepare(
+      "INSERT INTO upload_parts(session_id,index_no,status,file_path) VALUES('incomplete',0,'receiving',?)",
+    ).run(path.join(source, "uploads", "partial.jpg"));
     await createBackup(source, target);
     // Later writes must not leak into the snapshot.
     db.exec("UPDATE submissions SET student_name='later'");
@@ -36,6 +50,28 @@ it("backs up real SQLite and files, restores relocated paths and refuses corrupt
       expect(
         recovered.prepare("SELECT COUNT(*) n FROM sessions").get()!.n,
       ).toBe(0);
+      expect(
+        recovered.prepare("SELECT file_path FROM submission_tiles").get()!
+          .file_path,
+      ).toBe(path.join(restored, "uploads", "tile.jpg"));
+      expect(
+        fs.readFileSync(path.join(restored, "uploads", "tile.jpg"), "utf8"),
+      ).toBe("synthetic tile");
+      expect(
+        recovered
+          .prepare("SELECT status FROM upload_sessions WHERE id='incomplete'")
+          .get()!.status,
+      ).toBe("cancelled");
+      expect(
+        recovered.prepare("SELECT COUNT(*) n FROM upload_parts").get()!.n,
+      ).toBe(0);
+      expect(
+        recovered
+          .prepare(
+            "SELECT value FROM system_flags WHERE key='restored_budget_review'",
+          )
+          .get()!.value,
+      ).toBe("1");
     } finally {
       recovered.close();
     }

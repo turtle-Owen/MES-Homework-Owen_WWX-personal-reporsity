@@ -1,3 +1,4 @@
+import { uploadTiledSubmission } from "./tiled-upload";
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -505,6 +506,19 @@ function SchoolDashboard({
               小时 {operations.modelUsage.callsLastHour} 次，当前调用{" "}
               {operations.modelUsage.active} 个。失败调用也计入用量。
             </p>
+            {operations.costBudget?.enabled && (
+              <p>
+                费用预算已用或预留{" "}
+                {(operations.costBudget.exposureMicroCny / 1000000).toFixed(4)}{" "}
+                元 /{" "}
+                {(operations.costBudget.schoolLimitMicroCny / 1000000).toFixed(
+                  2,
+                )}{" "}
+                元；待核实用量 {operations.costBudget.uncertain} 笔。
+                {operations.costBudget.requiresReview &&
+                  "恢复后账本待管理员确认，模型调用已暂停。"}
+              </p>
+            )}
             <p>
               近 15 分钟请求 {operations.requestsLast15Minutes.requests}{" "}
               次，服务端错误 {operations.requestsLast15Minutes.serverErrors}{" "}
@@ -671,7 +685,13 @@ function Assignments({
     [creating, setCreating] = useState(false),
     [selected, setSelected] = useState(""),
     [files, setFiles] = useState<FileList | null>(null),
-    [studentId, setStudentId] = useState("");
+    [studentId, setStudentId] = useState(""),
+    [tilingAvailable, setTilingAvailable] = useState(false),
+    [useTiling, setUseTiling] = useState(false),
+    [uploading, setUploading] = useState(false),
+    [uploadProgress, setUploadProgress] = useState("");
+  const uploadController = useRef<AbortController | null>(null);
+  const uploadSession = useRef<string | null>(null);
   const load = () =>
     Promise.all([
       api<Assignment[]>("/assignments"),
@@ -688,6 +708,25 @@ function Assignments({
   useEffect(() => {
     load();
   }, []);
+  useEffect(() => {
+    let active = true;
+    void api<{ clientTiling: boolean }>("/upload-capabilities")
+      .then((c) => {
+        if (active) setTilingAvailable(c.clientTiling);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+      uploadController.current?.abort();
+    };
+  }, []);
+  const cancelUpload = async () => {
+    uploadController.current?.abort();
+    const id = uploadSession.current;
+    if (id) await api(`/upload-sessions/${id}`, { method: "DELETE" });
+    uploadSession.current = null;
+    setUploadProgress("");
+  };
   const create = async (payload: {
     title: string;
     dueAt: string;
@@ -705,12 +744,38 @@ function Assignments({
       return;
     }
     if (!files?.length) return;
-    const body = new FormData();
-    Array.from(files).forEach((file) => body.append("files", file));
-    if (studentId) body.append("studentId", studentId);
-    await api(`/assignments/${selected}/submissions`, { method: "POST", body });
-    notify("原件已上传，可前往识别与复核开始 OCR。");
-    setFiles(null);
+    if (uploading) return;
+    setUploading(true);
+    const controller = new AbortController();
+    uploadController.current = controller;
+    try {
+      if (useTiling) {
+        await uploadTiledSubmission(Array.from(files), selected, studentId, {
+          signal: controller.signal,
+          progress: setUploadProgress,
+          sessionId: uploadSession.current,
+          remember: (id) => {
+            uploadSession.current = id;
+          },
+        });
+      } else {
+        setUploadProgress("正在上传原件…");
+        const body = new FormData();
+        Array.from(files).forEach((file) => body.append("files", file));
+        if (studentId) body.append("studentId", studentId);
+        await api(`/assignments/${selected}/submissions`, {
+          method: "POST",
+          body,
+          signal: controller.signal,
+        });
+      }
+      uploadSession.current = null;
+      notify("原件已上传，可前往识别与复核开始 OCR。");
+      setFiles(null);
+      setUploadProgress("");
+    } finally {
+      setUploading(false);
+    }
   };
   return (
     <>
@@ -769,6 +834,7 @@ function Assignments({
             <span>对应的正式作业</span>
             <select
               value={selected}
+              disabled={uploading || !!uploadSession.current}
               onChange={(e) => setSelected(e.target.value)}
             >
               <option value="">
@@ -786,6 +852,7 @@ function Assignments({
               <span>关联学生账户</span>
               <select
                 value={studentId}
+                disabled={uploading || !!uploadSession.current}
                 onChange={(e) => setStudentId(e.target.value)}
               >
                 <option value="">请选择本校学生</option>
@@ -809,15 +876,47 @@ function Assignments({
               type="file"
               accept="image/jpeg,image/png,image/webp,application/pdf,.docx,.doc,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               multiple
+              disabled={uploading || !!uploadSession.current}
               onChange={(e) => setFiles(e.target.files)}
             />
           </label>
+          {tilingAvailable && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={useTiling}
+                disabled={uploading || !!uploadSession.current}
+                onChange={(e) => setUseTiling(e.target.checked)}
+              />
+              在设备上切分照片（保留原图，仅支持 JPG/PNG/WebP）
+            </label>
+          )}
+          {uploadProgress && <p role="status">{uploadProgress}</p>}
+          {(uploading || uploadSession.current) && (
+            <Button
+              onClick={() =>
+                void cancelUpload().catch((e) => notify(e.message))
+              }
+            >
+              取消本次上传
+            </Button>
+          )}
           <Button
             className="full"
-            disabled={!files?.length || (user.role === "teacher" && !studentId)}
+            disabled={
+              uploading ||
+              !files?.length ||
+              (user.role === "teacher" && !studentId)
+            }
             onClick={() => send().catch((e) => notify(e.message))}
           >
-            {selected ? "保存并进入识别队列" : "先创建正式作业"}
+            {uploading
+              ? "正在处理上传…"
+              : uploadSession.current
+                ? "重试未完成的上传"
+                : selected
+                  ? "保存并进入识别队列"
+                  : "先创建正式作业"}
           </Button>
         </section>
       </div>
@@ -1370,11 +1469,14 @@ function Review({ notify }: { notify: (s: string) => void }) {
                 )}
               </div>
               {detail.recognitionJob &&
-                ["queued", "recognizing", "failed"].includes(detail.status) && (
+                (["queued", "recognizing", "failed"].includes(detail.status) ||
+                  detail.recognitionJob.status === "failed") && (
                   <p role="status">
-                    {detail.status === "queued"
-                      ? "已排队，系统会自动处理。"
-                      : statusName(detail.status)}
+                    {detail.recognitionJob.status === "failed"
+                      ? "上次后台识别未完成。"
+                      : detail.status === "queued"
+                        ? "已排队，系统会自动处理。"
+                        : statusName(detail.status)}
                     {` 已尝试 ${detail.recognitionJob.attempts} 次。`}
                     {detail.recognitionJob.error &&
                       ` ${detail.recognitionJob.error}`}

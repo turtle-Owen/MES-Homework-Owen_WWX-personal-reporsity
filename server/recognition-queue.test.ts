@@ -158,3 +158,31 @@ describe("durable recognition", () => {
     ).toBe("failed");
   });
 });
+
+it("restores prior reviewed grades when a queued call cannot reserve a budget", async () => {
+  const queue = createRecognitionQueue(db, async () => {
+    throw Object.assign(new Error("quota"), {
+      code: "MODEL_QUOTA",
+      status: 429,
+    });
+  });
+  const before = db
+    .prepare("SELECT status,teacher_reviewed,score FROM submissions WHERE id=?")
+    .get(submission.id);
+  queue.enqueue(submission, user);
+  await queue.tick();
+  expect(
+    db
+      .prepare(
+        "SELECT status,teacher_reviewed,score FROM submissions WHERE id=?",
+      )
+      .get(submission.id),
+  ).toEqual(before);
+  expect(
+    db
+      .prepare(
+        "SELECT status,error FROM recognition_jobs WHERE submission_id=?",
+      )
+      .get(submission.id),
+  ).toMatchObject({ status: "failed", error: expect.stringContaining("保留") });
+});

@@ -58,6 +58,10 @@ async function start() {
       PORT: String(port),
       HOST: "127.0.0.1",
       NODE_ENV: "test",
+      CLIENT_TILING_ENABLED: "0",
+      DEEPSEEK_FILES_ENABLED: "0",
+      MODEL_SCHOOL_DAILY_MICRO_CNY: "0",
+      MODEL_USER_DAILY_MICRO_CNY: "0",
       APP_SECRET: "round-three-test-only-secret-32-characters",
     },
     stdio: "ignore",
@@ -137,6 +141,9 @@ beforeAll(async () => {
   fs.writeFileSync(
     preload,
     `import fs from 'node:fs';
+    import dns from 'node:dns';
+    // Offline fixture: mock DNS alongside model HTTP responses.
+    dns.promises.lookup=async()=>[{address:'1.1.1.1',family:4}];
     globalThis.fetch = async (_url, options) => {
       const {payload,delay}=JSON.parse(fs.readFileSync(${JSON.stringify(path.join(dir, "model.json"))},'utf8'));
       fs.appendFileSync(${JSON.stringify(modelLog())}, options.body+'\\n');

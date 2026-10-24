@@ -51,3 +51,50 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_model_usage_active ON model_usage(lease_until) WHERE finished_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_jobs_submission_history ON recognition_jobs(submission_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_submissions_file_path ON submissions(file_path);
+
+-- Integer micro-CNY ledger. Uncertain/dispatched requests retain their reservation.
+CREATE TABLE IF NOT EXISTS model_costs(
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL, school_id TEXT NOT NULL,
+ provider TEXT NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
+ reserved INTEGER NOT NULL, charged INTEGER NOT NULL DEFAULT 0,
+ input_bound INTEGER NOT NULL, output_bound INTEGER NOT NULL,
+ input_rate INTEGER NOT NULL, output_rate INTEGER NOT NULL,
+ created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cost_school ON model_costs(school_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_cost_user ON model_costs(user_id,created_at);
+CREATE TABLE IF NOT EXISTS upload_sessions(
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL, school_id TEXT NOT NULL,
+ assignment_id TEXT, student_id TEXT, status TEXT NOT NULL,
+ plan_json TEXT NOT NULL, reserved_bytes INTEGER NOT NULL, actual_bytes INTEGER NOT NULL DEFAULT 0,
+ created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, submission_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_upload_user ON upload_sessions(user_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_upload_school ON upload_sessions(school_id,created_at);
+CREATE TABLE IF NOT EXISTS upload_parts(
+ session_id TEXT NOT NULL,index_no INTEGER NOT NULL,status TEXT NOT NULL DEFAULT 'empty',
+ file_path TEXT,bytes INTEGER,sha256 TEXT,mime TEXT,token TEXT,lease_until INTEGER,
+ PRIMARY KEY(session_id,index_no),FOREIGN KEY(session_id) REFERENCES upload_sessions(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS submission_tiles(
+ submission_id TEXT NOT NULL,position INTEGER NOT NULL,page_no INTEGER NOT NULL,
+ x INTEGER NOT NULL,y INTEGER NOT NULL,width INTEGER NOT NULL,height INTEGER NOT NULL,
+ file_path TEXT NOT NULL UNIQUE,file_type TEXT NOT NULL,
+ PRIMARY KEY(submission_id,position),FOREIGN KEY(submission_id) REFERENCES submissions(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS provider_files(
+ id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,credential_hash TEXT NOT NULL,
+ encrypted_key TEXT NOT NULL,iv TEXT NOT NULL,remote_id TEXT,bytes INTEGER NOT NULL,
+ status TEXT NOT NULL,created_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,
+ cleanup_after INTEGER NOT NULL,attempts INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_provider_files_cleanup ON provider_files(status,cleanup_after);
+CREATE TABLE IF NOT EXISTS model_cost_receipts(cost_id TEXT PRIMARY KEY,prompt_tokens INTEGER NOT NULL,completion_tokens INTEGER NOT NULL,recorded_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS model_cost_reconciliations(id TEXT PRIMARY KEY,cost_id TEXT NOT NULL,before_charge INTEGER NOT NULL,after_charge INTEGER NOT NULL,note TEXT NOT NULL,created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS upload_attempts(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,school_id TEXT NOT NULL,bytes_reserved INTEGER NOT NULL,created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_upload_attempt_user ON upload_attempts(user_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_upload_attempt_school ON upload_attempts(school_id,created_at);
+CREATE INDEX IF NOT EXISTS idx_upload_attempt_time ON upload_attempts(created_at);
+CREATE INDEX IF NOT EXISTS idx_upload_session_expiry ON upload_sessions(status,expires_at);
+CREATE TABLE IF NOT EXISTS recognition_sources(job_id TEXT PRIMARY KEY,snapshot_json TEXT NOT NULL,FOREIGN KEY(job_id) REFERENCES recognition_jobs(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS system_flags(key TEXT PRIMARY KEY,value TEXT NOT NULL);
