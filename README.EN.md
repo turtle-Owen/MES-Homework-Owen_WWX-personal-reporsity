@@ -26,16 +26,13 @@ A new module for classroom review sessions that directly consumes teacher-review
 
 **Statistical Note**: Only mistakes confirmed by teachers in "Recognition & Review" enter statistics. Questions marked "Unrecognizable" are listed separately and excluded from student error cause percentages to prevent misjudgment due to poor scan quality.
 
-## rc5 Capabilities
-
-- Independent school administrator account registration; school accounts do not set grade levels, subjects, or classes, and are used to view school-wide data and create teacher/student accounts.
-- Teachers can register students individually or import up to 500 students at once via CSV/XLSX.
-- New homework supports JPG, PNG, WebP, PDF, DOCX, and DOC uploads: PDFs are OCR'd page by page, DOCX extracts body text, tables, and embedded images, DOC extracts readable text — all unified into editable drafts.
-- PDFs are converted to page images on the server; users no longer need to manually convert to images.
-- Student homework uploads are strictly aligned with official questions; OCR suggestions are written to the mistake notebook only after teacher review.
-- Homework import automatically supplements standard answers, scoring criteria, and missing knowledge points; teachers primarily spot-check and correct.
-- Mistakes automatically generate step-by-step solutions and similar practice problems; knowledge points are marked as passed once the student answers all correctly.
-- 10 model provider presets; API keys are encrypted with AES-256-GCM on the server.
+-  Knowledge point mastery rate: Aggregate the school-based knowledge points by question number, sort them from the weakest, and directly point out the loopholes that need to be filled first in this lesson.
+-   - Error attribution: Built-in 12 types of error causes (conceptual confusion, question review deviation, careless calculation, missing steps, poor memory of formulas, omission of conditions, etc.). First use keyword rules to categorically classify. The teacher can then click "AI Re-Attribution" to let the model combine the question stem and knowledge points to review; the error causes are strictly divided according to question numbers, and the sum of the proportions is always 100%.
+    -  - Review sheets for frequently mistaken questions: Sort by the number of people who made mistakes, expand to see the students who made the mistakes, reference answers, step-by-step analysis, similar exercises, and the AI-generated "tell to students/demonstrate on the blackboard/check immediately after speaking".
+       -  - Classroom lecture and evaluation lesson plan: theme, lesson time, goals, timeline (what to talk about, what the teacher does, what students do) and a blackboard design that can be copied and written on.
+          -  - Hierarchical coaching and error cause intervention: Each error cause is assigned a classroom action that can be performed within 5 minutes, and a layered coaching list is given that can be directly named.
+             - - After-class homework: Only for the knowledge points that were wrong this time, you can generate new re-practice homework for the selected frequently wrong questions with one click. - Student follow-up list: Mark "Observation/Follow-up/Key Points" to generate an individualized diagnosis of the student (weak knowledge points, analysis of error causes, reinforcement actions, targeted exercises, and an explanation for parents) with one click.
+               - - Export: Export Markdown lecture notes with one click, or print them directly into A4 lecture notes and bring them to class.
 
 ## One-Click Deployment (Windows)
 
