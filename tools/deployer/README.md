@@ -1,168 +1,171 @@
-# 一键部署器（C++ 控制台程序）
+# 校园作业分析 · 桌面版一键部署器
 
-把「校园作业分析」网站部署到任意一台 Windows 电脑上：自动检测并安装依赖、准备源码、构建、启动服务，并按需开放**局域网**或**公网（Cloudflare 隧道 / 自己的域名）**访问。
+**v0.2.1-rc3（build26102403）** · MIT License · 单文件、无外部运行时依赖
 
-- 纯 Win32 + C++17 实现，只依赖 Windows 自带组件（curl、tar、Winsock），不需要额外运行库
-- 单文件可执行程序，约 3 MB，静态链接
-- 两种使用方式：**控制台交互菜单** 与 **内置可视化 Web 控制台**
+新版部署器是一个 **C++17 桌面应用**（GLFW + Dear ImGui + miniz，全部静态编译进单文件），
+取代原来的 C++ 控制台部署器：启动后在「本地版 / 服务器版」之间选择，按向导完成
+下载运行时 → 校验 → 解压 → 写入配置 → 启动/注册服务 → 健康检查，全程可视化。
 
-## 快速开始
+- **Apple 风格 UI**：浅色玻璃质感卡片、圆角、轻阴影、系统字体；Windows 11 使用 Mica/Acrylic
+  系统级毛玻璃，macOS 使用 `NSVisualEffectView` 真实毛玻璃，Linux 使用透明窗口 + 柔和玻璃光效。
+- **零依赖**：目标机不需要预装 Node.js、npm、Git、Python 或 VC++ 运行库；应用运行时与 Node
+  二进制由部署器下载/解压（也支持离线 zip）。
+- **安装包/本体单文件**：每个平台一个可执行文件，见 GitHub Releases 的 `v0.2.1-rc3` 附件。
+
+## 界面预览
+
+![欢迎页](../../docs/screenshots-v0.2.1/deployer-welcome.png)
+![配置页](../../docs/screenshots-v0.2.1/deployer-configure.png)
+![安装进度](../../docs/screenshots-v0.2.1/deployer-installing.png)
+![完成页](../../docs/screenshots-v0.2.1/deployer-result.png)
+![关于页](../../docs/screenshots-v0.2.1/deployer-about.png)
+
+## 两个版本
+
+| | 本地版 | 服务器版 |
+| --- | --- | --- |
+| 使用场景 | 一台电脑自己用 | 班级/学校服务器、局域网或公网访问 |
+| 监听地址 | `127.0.0.1` | 默认 `0.0.0.0`（可关闭局域网） |
+| 开机自启 | 可选 | 可选（Windows 计划任务 / systemd / launchd） |
+| 防火墙 | 不需要 | 可自动放行端口（需管理员授权） |
+| 数据目录 | 安装目录 `data/` | 安装目录 `data/`，可改到独立磁盘 |
+| 完成后 | 自动打开浏览器 | 展示局域网访问地址与运维提示 |
+
+> 一个可执行文件即可完成两种版本：首屏选择本地版或服务器版。
+
+## 支持的系统
+
+| 系统 | 架构 | 部署器 | 应用运行时 |
+| --- | --- | --- | --- |
+| Windows 10 / 11 | x64 | ✅ | ✅（Node.js 24 x64） |
+| Windows 10 / 11 | arm64 | ✅ | ✅（Node.js 24 arm64） |
+| Windows 10 / 11 | x86 | ✅ | ⚠️ 官方 Node.js 24 已无 32 位版本；部署器可运行/配置，应用运行需 64 位设备或服务器 |
+| Debian / Ubuntu 等 Debian 系 | x64 / x86 / arm64 | ✅ | x64/arm64 ✅；x86 ⚠️（同 Node.js 32 位限制） |
+| RHEL / Rocky / AlmaLinux 等 RHEL 系 | x64 / x86 / arm64 | ✅ | x64/arm64 ✅；x86 ⚠️ |
+| 银河麒麟（Kylin V10 SP2+） | x64 / x86 / arm64 | ✅ | x64/arm64 ✅；x86 ⚠️ |
+| macOS 11+ | Apple Silicon（arm64） | ✅ | ✅（Node.js 24 arm64） |
+
+说明：
+
+- Linux 构建目标为 glibc ≥ 2.31（Debian 11+ / Ubuntu 20.04+ / RHEL 9+ / Kylin V10 SP2+）；
+  其它发行版若 glibc 过旧，请用容器或升级系统。
+- macOS 目前只提供 Apple Silicon 单文件（Intel Mac 可通过 Rosetta 或源码构建）。
+- 部署器本体可在所有列出的系统/架构运行；应用运行时是否需要 64 位取决于是否有对应
+  Node.js 官方二进制（Node 24 不再提供 32 位 Windows/Linux 版本）。
+
+## 下载
+
+前往 [GitHub Releases](https://github.com/turtlelnc/MES-Homework/releases) 的
+`v0.2.1-rc3`（构建 `26102403`），按平台下载单个可执行文件：
 
 ```
-campus-deploy.exe                  交互式菜单（推荐首次使用）
-campus-deploy.exe --web            打开浏览器可视化部署控制台
-campus-deploy.exe --mode lan       直接部署到局域网
-campus-deploy.exe --mode tunnel    直接部署并用 Cloudflare 临时域名公开
-campus-deploy.exe --mode domain --domain hw.example.com --api-token cf_xxx
+mes-deployer-windows-x64.exe
+mes-deployer-windows-x86.exe
+mes-deployer-windows-arm64.exe
+mes-deployer-linux-x64
+mes-deployer-linux-x86
+mes-deployer-linux-arm64
+mes-deployer-macos-arm64
 ```
 
-## 三种部署方式
+应用运行时包（部署器自动下载，也可手动离线使用）：
 
-| 方式 | 适用场景 | 访问地址 |
-| --- | --- | --- |
-| `--mode lan` | 课堂、办公室：同一 WiFi / 局域网内的电脑、平板、手机都能打开 | `http://<本机IP>:8787` |
-| `--mode tunnel` | 需要临时给校外的人看：自动生成 `https://xxx.trycloudflare.com`，程序关闭即失效，无需域名和账号 | 自动分配 |
-| `--mode domain` | 长期稳定使用自己的域名（域名需已托管在 Cloudflare） | `https://你的域名` |
+```
+mes-homework-app-windows-x64.zip / -windows-arm64 / -linux-x64 / -linux-arm64 / -macos-arm64
+mes-homework-app-manifest.json   （版本与 SHA-256 清单）
+SHA256SUMS.txt                   （全部资产校验值）
+```
 
-### 自定义域名需要什么
+Windows 首次运行 SmartScreen 可能提示“未知发布者”，选择“更多信息 → 仍要运行”；
+macOS 需在“隐私与安全性”中允许打开（或 `xattr -dr com.apple.quarantine`）。
 
-1. 域名已托管在 Cloudflare（DNS 在 Cloudflare 上）。
-2. 一个 API Token，权限包含 `Zone → DNS → Edit`、`Zone → Zone → Read`；自动创建隧道还需要 `Account → Cloudflare Tunnel → Edit` 和读取账户的权限（在 Cloudflare 面板「我的个人资料 → API 令牌」创建）。
-3. 二选一提供隧道凭据：
-   - 只给 API Token：程序会在你的账户里自动创建名为 `smart-campus-homework` 的本地管理隧道，并保存匹配的随机密钥到 `~/.cloudflared/tunnel.json`；写入失败将停止部署，不修改 DNS。
-   - 或者先在 Zero Trust 面板创建隧道，把**连接器令牌**用 `--tunnel-token` 传入，并在面板配置该域名到本地服务地址的路由；不填写 `--tunnel-id` 时 DNS 需手动配置。
+## 使用
 
-程序会自动完成：定位 DNS 区域 → 创建/更新指向隧道的 CNAME 记录 → 写入 `~/.cloudflared/config.yml` → 启动连接器并等待隧道就绪。
+1. 双击运行部署器（无需安装）。
+2. 选择「本地版」或「服务器版」。
+3. 确认安装目录、端口与安装包来源：
+   - 默认自动下载 GitHub Release 中对应平台的运行时包（需要联网）；
+   - 离线部署：把 `mes-homework-app-<平台>-<架构>.zip` 放在部署器同目录，或点击“选择本地 zip”。
+4. 点击「开始部署」，等待下载、校验、解压、启动与健康检查完成。
+5. 完成后自动打开浏览器；服务器版会显示局域网地址，并把服务注册为开机自启（可选）。
 
-## 命令行参数
+部署器命令行：
 
-| 参数 | 说明 |
-| --- | --- |
-| `--mode lan\|tunnel\|domain` | 部署方式；不指定则进入交互菜单 |
-| `--domain <域名>` | 自定义域名 |
-| `--api-token <令牌>` | Cloudflare API Token（写 DNS 记录） |
-| `--tunnel-token <令牌>` | 命名隧道连接器令牌 |
-| `--tunnel-id <ID>` | 已有隧道 ID（可选） |
-| `--port <端口>` | 服务端口，默认 8787 |
-| `--dir <目录>` | 指定源码目录；缺省自动探测，找不到就从 GitHub 下载 |
-| `--repo <地址>` | 源码仓库地址 |
-| `--web` / `--web-port <端口>` | 启用可视化控制台（默认端口 8899） |
-| `--skip-install` / `--skip-build` | 跳过 npm install / npm run build |
-| `--verbose` | 输出完整构建日志 |
-| `--help` / `--version` | 帮助 / 版本 |
-
-## 依赖自动安装策略
-
-程序按「先检测、再安装、装完复检」的顺序处理：
-
-| 依赖 | 是否必需 | 安装方式 |
-| --- | --- | --- |
-| Node.js ≥ 24 | 必需 | 优先 `winget install OpenJS.NodeJS`；无 winget 时提示手动安装 |
-| npm | 必需 | 随 Node.js 安装 |
-| curl | 必需 | Windows 10 1803+ 自带，缺失时明确报错 |
-| cloudflared | 公网模式必需 | 优先 winget；失败则从 Cloudflare 官方 GitHub Release 下载到 `%LOCALAPPDATA%\SmartCampusDeployer\tools` 并加入用户 PATH |
-| Git | 可选 | 无 git 时直接用源码压缩包，不影响部署 |
-
-安装到自定义目录后程序会**同时更新注册表 PATH 和当前进程 PATH**，因此同一次运行内即可继续使用刚装好的命令。
-
-## 源码获取顺序
-
-1. `--dir` 指定的目录（若确实是本项目）
-2. 可执行文件所在目录（部署包与源码放在一起时）
-3. 可执行文件下的 `source/`、`MES-Homework/`、`app/` 子目录
-4. 以上都没有 → 从 GitHub 下载源码压缩包并解压（失败再回退 `git clone`）
-
-## 可视化 Web 控制台
-
-`--web` 会启动一个**仅监听 127.0.0.1** 的小型 HTTP 服务并自动打开浏览器，页面提供：
-
-- 依赖检测结果与「安装缺失依赖」按钮
-- 三种部署方式选择，自定义域名模式带域名 / API Token / 隧道令牌输入框
-- 七步部署进度条（准备源码 → 安装依赖 → 构建 → 生成配置 → 启动服务 → 健康检查 → 开放访问）
-- 彩色实时运行日志与最终访问地址（可点击）
-
-Web 控制台只在本机回环地址上监听，不对外暴露。
+```
+mes-deployer --self-test    # 核心自检（CI/诊断用，无窗口）
+mes-deployer --demo         # 演示模式：不联网、不写真实目录
+mes-deployer --version      # 版本号
+mes-deployer --help
+```
 
 ## 构建
 
-需要 MinGW-w64（含 g++）或 Visual Studio 生成工具，以及 CMake：
+要求：CMake 3.16+、C++17 编译器（MSVC 2019+/MinGW-w64/Clang）、Git 网络（首次下载
+GLFW 3.4、Dear ImGui v1.91.9b、miniz 3.0.2；或用 `-DMES_DEPLOYER_DEPS_DIR=<dir>` 指向
+已下载的 `glfw/`、`imgui/`、`miniz/` 源码目录离线构建）。
+
+Windows（MinGW-w64 或 Visual Studio）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/deployer/build.ps1
-# 产物：dist-deployer/campus-deploy.exe
+# 产物：dist-deployer/mes-deployer.exe
 ```
 
-没有 CMake 时脚本会直接用 g++ 编译。手动编译等价命令：
+Linux（Debian/Ubuntu 构建依赖）：
 
-```powershell
-g++ -std=c++17 -O2 -DNOMINMAX -DWIN32_LEAN_AND_MEAN -static -static-libgcc -static-libstdc++ `
-  tools/deployer/src/*.cpp -o dist-deployer/campus-deploy.exe `
-  -lws2_32 -liphlpapi -lshell32 -lbcrypt -ladvapi32 -lole32
+```bash
+sudo apt-get install -y cmake ninja-build g++ libx11-dev libxrandr-dev \
+  libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev xorg-dev
+cmake -S tools/deployer -B tools/deployer/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build tools/deployer/build --parallel
+./tools/deployer/build/mes-deployer --self-test
 ```
 
-产物为静态链接的单文件程序，可直接拷到其它 Windows 10/11 机器运行。
+macOS（Apple Silicon）：
 
-### 云端 Windows 构建与进程验证
-
-以下命令可在安装 CMake、Visual Studio C++ 工具链和 Node.js 的 Windows runner 执行：
-
-```powershell
-cmake -S tools/deployer -B tools/deployer/build -G "Visual Studio 17 2022" -A x64
-cmake --build tools/deployer/build --config Release --parallel
-ctest --test-dir tools/deployer/build -C Release --output-on-failure
-node tools/deployer/tests/windows-smoke.mjs dist-deployer/campus-deploy.exe
+```bash
+cmake -S tools/deployer -B tools/deployer/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+cmake --build tools/deployer/build --parallel
+./tools/deployer/build/mes-deployer --self-test
 ```
 
-CTest 运行 JSON、安全边界、构建状态及 mock 隧道四组回归，Release 配置也启用断言。后者不会向 Cloudflare 发请求或落盘真实凭据。四组测试也可在 Linux 上通过 CMake/CTest 执行，Windows 主程序只在 Windows 构建。
+单元测试：构建后运行 `ctest --test-dir tools/deployer/build --output-on-failure` 或
+`mes-deployer-test`。
 
-进程测试启动真实的 `campus-deploy.exe`，验证 `--help`、`--version`、控制台页面/状态接口、Host/Origin 拒绝、异常 JSON 后服务仍可用及正常退出。使用临时目录和随机回环端口，通过 `--no-browser` 避免打开桌面浏览器；不执行安装、部署、DNS 修改或真实隧道连接。此测试不能替代真实 Cloudflare 连通性和完整交互测试。
+## 运行时包结构
 
-## 源码结构
+部署器解压 `mes-homework-app-<os>-<arch>.zip` 后按如下结构安装：
 
 ```
-tools/deployer/
-├── CMakeLists.txt          构建配置
-├── build.ps1               一键构建脚本
-├── tests/json_test.cpp     JSON 解析器测试（真实 API 响应形态）
-└── src/
-    ├── main.cpp            入口、控制台交互菜单、命令行参数分发
-    ├── deploy.h/.cpp       部署核心：依赖检测与安装、源码准备、构建、启动、隧道
-    ├── util.h/.cpp         基础设施：UTF-8 控制台、彩色日志、进程管道、HTTP(curl)、网卡枚举
-    ├── json.h/.cpp         极简 JSON 解析（Cloudflare API 与错误信息解析）
-    ├── cloudflare.h/.cpp   Cloudflare API：Token 校验、区域定位、隧道的 DNS 记录写入
-    └── webconsole.h/.cpp   内置 Web 部署控制台（页面 + 状态/部署/日志接口）
+<安装目录>/
+  runtime/node[.exe]       # Node.js 24 官方运行时
+  app/                     # server/ + dist/ + node_modules/ + package*.json
+  data/                    # SQLite 与上传文件
+  logs/                    # 服务日志
+  .env                     # APP_SECRET / PORT / HOST / NODE_ENV / DATA_DIR
+  start.*                  # 本地版启动脚本（服务器版含服务定义）
+  state.json               # 安装记录（供部署器识别/修复/卸载）
 ```
 
-## 安全说明
+发布流程（维护者）：`.github/workflows/deployer-release.yml` 在推动分支/打 tag 时构建
+各平台部署器与运行时包并上传 artifact；打 `v*` tag 时自动创建 GitHub Release 并附加
+`manifest` / `SHA256SUMS.txt`。也可用：
 
-- 部署时会在源码目录写入 `.env`，其中 `APP_SECRET` 为随机生成并**在后续部署中复用**（避免每次部署让所有登录态失效）。该文件已被 `.gitignore` 排除，请勿提交或外传。
-- 公网模式会把服务暴露到互联网。`.env` 中 `HOST=0.0.0.0` 表示监听全部网卡；如果只想本机用，可改为 `127.0.0.1`。
-- 临时隧道（trycloudflare）没有可用性保证，切勿用于长期生产。
-
-## 已知限制
-
-- 仅支持 Windows（使用 Win32 API）。
-- 首次在局域网内访问若被防火墙拦截，程序会打印一条 `netsh advfirewall` 命令，需要管理员权限执行一次。
-- 自定义域名模式依赖 Cloudflare API；若域名未托管在 Cloudflare，程序会明确报错并建议改用手动配置。
-
-### 安全回归检查（无需 Windows）
-
-```sh
-g++ -std=c++17 -Wall -Wextra -pedantic tools/deployer/tests/security_test.cpp tools/deployer/src/json.cpp -o /tmp/deployer-security-test
-/tmp/deployer-security-test
+```bash
+node tools/deployer/packaging/build-app-bundle.mjs --out release/mes-homework-app-linux-x64.zip
+node tools/deployer/packaging/build-manifest.mjs --dir release --version v0.2.1-rc3 --build 26102403
 ```
 
-此检查覆盖控制台 Host/Origin 边界、命令参数与配置注入、请求体长度解析、接收截止时间的剩余时长计算、后台任务复位守卫、停止服务的忙状态判断和 JSON 嵌套上限。完整部署器依赖 Win32；上述检查不包含套接字接收、线程调度或实际停止服务测试，不能替代 Windows 上的构建和浏览器端到端验证。
+## 安全与限制
 
-控制台仅接受 `127.0.0.1:<端口>`，修改操作要求浏览器同源 Origin；跨站调用以及自定义域名指向本机的请求会被拒绝。请求头和请求体各限制为 16 KiB，完整接收请求最多 5 秒。任务执行期间不能停止服务。部署参数及路径包含 shell 特殊字符时会明确拒绝。
-
-服务通过 Node.js `--env-file=.env` 读取配置，不把 APP_SECRET 放到 shell 命令中。已有 APP_SECRET 和其他配置会保留；已有密钥过短或配置无法写入时部署会中止。新密钥使用 Windows 系统安全随机数。
-
-### 隧道凭据回归检查（Linux / 无网络）
-
-```sh
-g++ -std=c++17 -Wall -Wextra -pedantic tools/deployer/tests/tunnel_test.cpp tools/deployer/src/cloudflare.cpp tools/deployer/src/json.cpp -o /tmp/deployer-tunnel-test
-/tmp/deployer-tunnel-test
-```
-
-HTTP、随机源和文件写入使用测试替身，验证发送给 API 的 secret 与落盘凭据一致、API 失败或无效 ID 不写文件，以及凭据写入失败不会报告成功。不会创建真实隧道或修改 DNS；完整 Windows 连接器启动仍需实测。
+- 下载与应用运行时包校验 SHA-256；解压拒绝 `..`、绝对路径与符号链接条目（zip-slip 防护）。
+- 服务器版的服务注册、防火墙放行需要管理员/root 权限，会显式请求授权；拒绝授权时不影响
+  本地版使用。
+- 日志不记录 APP_SECRET、API Key 或 OAuth Token；`.env` 仅写入本机安装目录。
+- 服务器版默认 `NODE_ENV=development`（HTTP 可登录）；若勾选“生产模式”，必须在外层配置
+  HTTPS 反向代理（如 Cloudflare/Nginx），否则浏览器会拒绝 Secure 会话 Cookie。
+- 32 位系统没有官方 Node.js 24 运行时，无法在本机运行应用；部署器仍可运行、生成配置与
+  访问说明。请使用 64 位系统或服务器版部署到 64 位机器。
+- 可选隧道/自定义域名请按 [OPERATIONS.md](../../OPERATIONS.md) 使用 cloudflared 或 Nginx，
+  部署器当前聚焦本地/局域网一键部署与开机自启。

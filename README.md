@@ -1,6 +1,17 @@
 # 校园作业分析 · Smart Campus Homework Analyzer
 
-**v0.2.1-rc1**（build26102401）｜ MIT License
+[![Version](https://img.shields.io/badge/version-v0.2.1--rc3-2ea44f?style=flat)](https://github.com/turtlelnc/MES-Homework/releases)
+[![Build](https://img.shields.io/badge/build-26102403-0A84FF?style=flat)](https://github.com/turtlelnc/MES-Homework/releases)
+[![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen?style=flat&logo=githubactions&logoColor=white)](https://github.com/turtlelnc/MES-Homework/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat)](LICENSE)
+[![Security](https://img.shields.io/badge/security-P0%2FP1%20fixed-success?style=flat)](SECURITY_REVIEW.md)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat)](tools/deployer/README.md)
+[![Deployer](https://img.shields.io/badge/deployer-desktop%20GUI-0A84FF?style=flat)](tools/deployer/README.md)
+[![Editions](https://img.shields.io/badge/editions-local%20%7C%20server-555555?style=flat)](tools/deployer/README.md)
+[![Node](https://img.shields.io/badge/node-%E2%89%A524-339933?style=flat&logo=nodedotjs&logoColor=white)](package.json)
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
+**v0.2.1-rc3**（build26102403）｜ MIT License
 
 [English](README.EN.md) | 中文
 
@@ -10,7 +21,7 @@
 
 这是可在学校或个人服务器运行的全栈版本。账户、学校、学生、知识库、作业、OCR、教师复核、错题本、试卷、家长看板与 AI 教学分析均使用持久化数据。
 
-## v0.2.1-rc1 新增（build26102401）
+## v0.2.1 新增（v0.2.1-rc1 起）
 
 ### 1. 三种作业复核方式（教师自选）
 
@@ -117,7 +128,7 @@ B3组 校园作业分析器
 详细的安全信息、负责任使用指南和数据隐私注意事项请参阅 [SAFETY.zh.md](SAFETY.zh.md)（[English](SAFETY.md)）。
 
 
-## V0.2.1-rc1（build26102401） 能力
+## v0.2.1 能力
 
 - 独立注册学校管理员账户；学校账户不设置学段、学科或班级，用于查看全校数据并创建教师、学生账户。
 - 教师单个注册学生，或通过 CSV/XLSX 一次导入最多 500 名学生（支持“账号名”列，留空时自动生成）。
@@ -136,23 +147,28 @@ B3组 校园作业分析器
 - AI批改作业无需再上传原题再批改，新增老师简单描述做作业内容的输入框（非必填）
 - 学生端的错题本应是引导学生思考并巩固，而不是直接放答案。
 
-## 一键部署（Windows）
+## 一键部署（桌面应用，无依赖）
 
-仓库自带一个 C++ 控制台部署器（`tools/deployer/`），可在任意 Windows 电脑上自动检测并安装依赖、准备源码、构建并启动服务，再按需开放局域网或公网访问：
+![桌面版一键部署器](docs/screenshots-v0.2.1/deployer-welcome.png)
+
+v0.2.1-rc3 起使用 **C++ 桌面版一键部署器**（GLFW + Dear ImGui + miniz，单文件、无外部运行时依赖，
+Apple 风格界面 + 轻量毛玻璃）。启动后选择 **本地版**（本机使用，自动打开浏览器）或
+**服务器版**（局域网/学校服务器，可选开机自启与防火墙放行），向导完成下载运行时 → SHA-256 校验 →
+解压 → 写入配置 → 启动/注册服务 → 健康检查。
+
+支持 Windows 10/11（x64/x86/arm64）、Debian/RHEL 系与银河麒麟（x64/x86/arm64）以及
+macOS Apple Silicon。部署器**不需要**目标机预先安装 Node.js、npm、Git 或 VC++ 运行库：
+应用运行时包与 Node 二进制随 GitHub Release 下载（也支持离线 zip）。
+
+从 [GitHub Releases](https://github.com/turtlelnc/MES-Homework/releases) 的 `v0.2.1-rc3`
+下载对应平台的单文件部署器（如 `mes-deployer-windows-x64.exe`），双击即可；也可从源码构建：
 
 ```powershell
-# 构建部署器（需要 MinGW-w64 或 MSVC + CMake，产物约 3 MB 单文件）
 powershell -ExecutionPolicy Bypass -File tools/deployer/build.ps1
-
-# 使用
-dist-deployer\campus-deploy.exe                 # 交互式菜单
-dist-deployer\campus-deploy.exe --web           # 浏览器可视化部署控制台
-dist-deployer\campus-deploy.exe --mode lan      # 局域网：同一网络内设备均可访问
-dist-deployer\campus-deploy.exe --mode tunnel   # Cloudflare 临时公网地址（https）
-dist-deployer\campus-deploy.exe --mode domain --domain hw.example.com --api-token cf_xxx
+# 产物：dist-deployer/mes-deployer.exe
 ```
 
-它会自动检测 Node.js / cloudflared / curl / git，缺什么装什么（优先 winget，失败则官方下载）；源码不在本机时从 GitHub 获取。详见 `tools/deployer/README.md`。
+Linux/macOS 构建、运行时包结构、离线安装与安全说明见 [tools/deployer/README.md](tools/deployer/README.md)。
 
 ## 本地或服务器运行
 
@@ -167,7 +183,7 @@ npm start
 
 开发时分别运行 `npm run dev:server` 和 `npm run dev`，访问 `http://127.0.0.1:5173`。生产服务默认监听 `127.0.0.1:8787`，可用 `HOST=0.0.0.0` 放开为局域网可访问；数据位于 `data/smart-campus.sqlite`，原件位于 `data/uploads/`。
 
-## 安全更新（2026-10-24，v0.2.1-rc1）
+## 安全更新（2026-10-24，v0.2.1-rc3）
 
 注册方式改为「账号名 + 密码 + 身份选择」，老师/学生/家长可凭学校代码自助注册（需求 4）；如学校希望保持由管理员统一建号，请设置 `ALLOW_PUBLIC_REGISTRATION=0`。学校代码不是身份凭证：学生不能自行修改学段或班级，教师只能看到自己任课作业与本校知识库，家长只能看到自己绑定的孩子，所有查询仍按学校与账号身份隔离。答卷与原件仅允许学生本人、任课教师、绑定家长及本校管理员读取；学生作业详情与错题本不直接返回答案；重新识别须再次人工复核（所选复核方式允许自动完成时除外）。
 

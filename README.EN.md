@@ -1,6 +1,17 @@
 # Smart Campus Homework Analyzer · 校园作业分析
 
-**v0.2.1-rc1** (build26102401) | MIT License
+[![Version](https://img.shields.io/badge/version-v0.2.1--rc3-2ea44f?style=flat)](https://github.com/turtlelnc/MES-Homework/releases)
+[![Build](https://img.shields.io/badge/build-26102403-0A84FF?style=flat)](https://github.com/turtlelnc/MES-Homework/releases)
+[![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen?style=flat&logo=githubactions&logoColor=white)](https://github.com/turtlelnc/MES-Homework/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue?style=flat)](LICENSE)
+[![Security](https://img.shields.io/badge/security-P0%2FP1%20fixed-success?style=flat)](SECURITY_REVIEW.md)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey?style=flat)](tools/deployer/README.md)
+[![Deployer](https://img.shields.io/badge/deployer-desktop%20GUI-0A84FF?style=flat)](tools/deployer/README.md)
+[![Editions](https://img.shields.io/badge/editions-local%20%7C%20server-555555?style=flat)](tools/deployer/README.md)
+[![Node](https://img.shields.io/badge/node-%E2%89%A524-339933?style=flat&logo=nodedotjs&logoColor=white)](package.json)
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
+**v0.2.1-rc3** (build26102403) | MIT License
 
 [中文](README.md) | English
 
@@ -10,7 +21,7 @@ Smart Campus Homework Analyzer: upload homework, AI grades it; teacher review tu
 
 This is a full-stack version that can run on school or personal servers. Accounts, schools, students, knowledge bases, homework, OCR, teacher review, mistake notebooks, exam papers, parent dashboards, and AI teaching analysis all use persistent data.
 
-## What's New in v0.2.1-rc1 (build26102401)
+## What's New in v0.2.1 (since v0.2.1-rc1)
 
 1. **Three teacher-selectable review modes**: review every question, review only uncertain items (high-confidence AI verdicts pass automatically), or no review (AI result is published immediately; incomplete model output still falls back to human review).
 2. **Explain the grade**: every graded item shows the result, the reference answer, and the AI's reasoning (why it was marked right/wrong). Visible in teacher review and the parent submission detail.
@@ -51,23 +62,32 @@ A new module for classroom review sessions that directly consumes teacher-review
              - - After-class homework: Only for the knowledge points that were wrong this time, you can generate new re-practice homework for the selected frequently wrong questions with one click. - Student follow-up list: Mark "Observation/Follow-up/Key Points" to generate an individualized diagnosis of the student (weak knowledge points, analysis of error causes, reinforcement actions, targeted exercises, and an explanation for parents) with one click.
                - - Export: Export Markdown lecture notes with one click, or print them directly into A4 lecture notes and bring them to class.
 
-## One-Click Deployment (Windows)
+## One-Click Deployment (desktop app, dependency-free)
 
-The repository includes a C++ console deployer (`tools/deployer/`) that can automatically detect and install dependencies, prepare source code, build, and start the service on any Windows computer, with optional LAN or public network access:
+![Desktop deployer](docs/screenshots-v0.2.1/deployer-welcome.png)
+
+Starting with v0.2.1-rc3 the project ships a **C++ desktop deployer** (GLFW + Dear ImGui + miniz,
+single file, no external runtime dependencies, Apple-style UI with light frosted glass). Pick
+**Local** (run on this computer and open the browser) or **Server** (LAN/school server, optional
+autostart and firewall rule); the wizard downloads the runtime, verifies SHA-256, extracts, writes
+the configuration, starts or registers the service and waits for a health check.
+
+Supported: Windows 10/11 (x64/x86/arm64), Debian/RHEL families and Kylin (x64/x86/arm64), and
+macOS on Apple Silicon. The deployer does **not** require Node.js, npm, Git or the VC++ runtime to
+be preinstalled: the app runtime bundle and Node binary are downloaded from the GitHub Release
+(offline zip is also supported).
+
+Download the single-file deployer for your platform from
+[GitHub Releases](https://github.com/turtlelnc/MES-Homework/releases) tag `v0.2.1-rc3`
+(e.g. `mes-deployer-windows-x64.exe`) and run it. To build from source:
 
 ```powershell
-# Build the deployer (requires MinGW-w64 or MSVC + CMake, output ~3 MB single file)
 powershell -ExecutionPolicy Bypass -File tools/deployer/build.ps1
-
-# Usage
-dist-deployer\campus-deploy.exe                 # Interactive menu
-dist-deployer\campus-deploy.exe --web           # Browser-based visual deployment console
-dist-deployer\campus-deploy.exe --mode lan      # LAN: accessible to all devices on the same network
-dist-deployer\campus-deploy.exe --mode tunnel   # Cloudflare temporary public URL (HTTPS)
-dist-deployer\campus-deploy.exe --mode domain --domain hw.example.com --api-token cf_xxx
+# output: dist-deployer/mes-deployer.exe
 ```
 
-It automatically detects Node.js / cloudflared / curl / git and installs whatever is missing (preferring winget, falling back to official downloads). Source code is fetched from GitHub if not present locally. See `tools/deployer/README.md` for details.
+Linux/macOS build instructions, runtime bundle layout, offline install and security notes are in
+[tools/deployer/README.md](tools/deployer/README.md).
 
 ## Local or Server Run
 
@@ -82,7 +102,7 @@ npm start
 
 For development, run `npm run dev:server` and `npm run dev` separately, then visit `http://127.0.0.1:5173`. Production server listens on `127.0.0.1:8787` by default; use `HOST=0.0.0.0` to allow LAN access. Data is stored in `data/smart-campus.sqlite`, with original files in `data/uploads/`.
 
-## Security update (2026-10-24, v0.2.1-rc1)
+## Security update (2026-10-24, v0.2.1-rc3)
 
 Registration is now account-name + password + role selection; teachers/students/parents may self-register with a school code (requirement 4). Set `ALLOW_PUBLIC_REGISTRATION=0` to restore administrator-only account creation. A school code is not an identity credential: students cannot change their own stage/class, teachers only see their own assignments and school knowledge base, parents only see linked children, and every query stays scoped by school and account. Submission files and answers require the submitting student, owning teacher, linked parent, or school administrator; student assignment responses and the guided mistake notebook never expose reference answers directly; re-recognition requires fresh teacher approval (except when the selected review mode auto-completes).
 

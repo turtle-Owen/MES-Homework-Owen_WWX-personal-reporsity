@@ -325,7 +325,7 @@ async function registerParent(ctx, payload, school, common) {
 }
 
 /**
- * 注册入口（供 e2e / 登录前置复用），payload 见 docs/v0.2.1-rc1-spec.md §3.1。
+ * 注册入口（供 e2e / 登录前置复用），payload 见 README「注册与登录」章节。
  * 返回值至少包含 {id, role, schoolId}；school 额外带 schoolCode/schoolName。
  */
 export async function registerAccount(ctx, payload) {

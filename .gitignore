@@ -33,3 +33,10 @@ cloudflared-tunnel.log
 # Browser CI artifacts (synthetic fixtures only)
 playwright-report/
 test-results/
+
+# Desktop deployer local builds / dependency cache (not committed)
+.tmp-deployer-deps/
+.tmp-deployer-ui/
+.tmp-release/
+tools/deployer/build-local/
+tools/deployer/build-*/

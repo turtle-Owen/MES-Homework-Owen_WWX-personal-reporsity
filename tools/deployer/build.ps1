@@ -1,12 +1,16 @@
-# 构建一键部署器（Windows / MinGW-w64 或 MSVC）
+# 校园作业分析 · 桌面版一键部署器 —— Windows 构建脚本
 #
 #   powershell -ExecutionPolicy Bypass -File tools/deployer/build.ps1
 #
-# 产物：dist-deployer/campus-deploy.exe
+# 产物：dist-deployer/mes-deployer.exe（单文件、无外部运行时依赖）
+# 依赖：CMake 3.16+、Ninja 或 Visual Studio、MinGW-w64 g++（任选其一）；
+#       GLFW/ImGui/miniz 由 CMake FetchContent 自动下载（离线可用 -DepsDir 指定本地源码）。
 [CmdletBinding()]
 param(
   [string]$Configuration = "Release",
-  [switch]$Clean
+  [switch]$Clean,
+  [switch]$SkipTests,
+  [string]$DepsDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,52 +19,69 @@ $root = Split-Path -Parent (Split-Path -Parent $here)
 $buildDir = Join-Path $here "build"
 $outDir = Join-Path $root "dist-deployer"
 
-Write-Host "校园作业分析 · 一键部署器 构建" -ForegroundColor Cyan
+Write-Host "校园作业分析 · 桌面部署器 构建" -ForegroundColor Cyan
 Write-Host "源码目录: $here"
+Write-Host "版本: v0.2.1-rc3 (build26102403)"
 
 if ($Clean -and (Test-Path $buildDir)) {
   Remove-Item -Recurse -Force $buildDir
   Write-Host "已清理构建目录" -ForegroundColor DarkGray
 }
 
-# 优先使用 CMake；找不到时直接用 g++ 编译
 $cmake = Get-Command cmake -ErrorAction SilentlyContinue
+if (-not $cmake) { throw "未找到 CMake，请先安装 CMake 3.16+。" }
 $ninja = Get-Command ninja -ErrorAction SilentlyContinue
+$gcc = Get-Command gcc -ErrorAction SilentlyContinue
 $gpp = Get-Command g++ -ErrorAction SilentlyContinue
 
-if ($cmake) {
-  # Let CMake discover Visual Studio when no MinGW compiler is present.
-  $configureArgs = @('-S', $here, '-B', $buildDir, "-DCMAKE_BUILD_TYPE=$Configuration")
-  if ($gpp) {
-    $generator = if ($ninja) { "Ninja" } else { "MinGW Makefiles" }
-    $configureArgs += @('-G', $generator, "-DCMAKE_CXX_COMPILER=$($gpp.Source)")
-  }
-  Write-Host "使用 CMake 构建…" -ForegroundColor Gray
-  & $cmake.Source @configureArgs
-  if ($LASTEXITCODE -ne 0) { throw "CMake 配置失败" }
-  & $cmake.Source --build $buildDir --config $Configuration
-  if ($LASTEXITCODE -ne 0) { throw "编译失败" }
-} elseif ($gpp) {
-  Write-Host "未找到 CMake，直接用 g++ 编译…" -ForegroundColor Gray
-  New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-  $sources = Get-ChildItem (Join-Path $here "src") -Filter *.cpp | ForEach-Object { $_.FullName }
-  & $gpp.Source -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter `
-    -DNOMINMAX -DWIN32_LEAN_AND_MEAN -static -static-libgcc -static-libstdc++ `
-    -o (Join-Path $outDir "campus-deploy.exe") `
-    @sources `
-    -lws2_32 -liphlpapi -lshell32 -lbcrypt -ladvapi32 -lole32
-  if ($LASTEXITCODE -ne 0) { throw "编译失败" }
-} else {
-  throw "未找到 cmake 或 g++。请安装 MinGW-w64（含 g++）或 Visual Studio 生成工具。"
+$configureArgs = @(
+  "-S", $here,
+  "-B", $buildDir,
+  "-DCMAKE_BUILD_TYPE=$Configuration",
+  "-DMES_DEPLOYER_TESTING=ON"
+)
+if ($DepsDir) { $configureArgs += "-DMES_DEPLOYER_DEPS_DIR=$DepsDir" }
+
+if ($gpp) {
+  $generator = if ($ninja) { "Ninja" } else { "MinGW Makefiles" }
+  $cCompiler = if ($gcc) { $gcc.Source } else { $gpp.Source }
+  $configureArgs += @("-G", $generator, "-DCMAKE_C_COMPILER=$cCompiler", "-DCMAKE_CXX_COMPILER=$($gpp.Source)")
 }
 
-$exe = Join-Path $outDir "campus-deploy.exe"
-if (-not (Test-Path $exe)) { throw "未生成可执行文件：$exe" }
+Write-Host "使用 CMake 配置…" -ForegroundColor Gray
+& $cmake.Source @configureArgs
+if ($LASTEXITCODE -ne 0) { throw "CMake 配置失败" }
+
+Write-Host "编译中…" -ForegroundColor Gray
+& $cmake.Source --build $buildDir --config $Configuration --parallel
+if ($LASTEXITCODE -ne 0) { throw "编译失败" }
+
+$exe = Get-ChildItem -Path $buildDir -Recurse -Filter "mes-deployer.exe" -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.FullName -notmatch "mes-deployer-test" } |
+  Select-Object -First 1
+if (-not $exe) { throw "未找到 mes-deployer.exe" }
+
+New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+$target = Join-Path $outDir "mes-deployer.exe"
+Copy-Item $exe.FullName $target -Force
+
+Write-Host ("构建完成：{0}（{1:N0} KB）" -f $target, ((Get-Item $target).Length / 1KB)) -ForegroundColor Green
+
+if (-not $SkipTests) {
+  Write-Host "运行核心自检…" -ForegroundColor Gray
+  & $target --self-test
+  if ($LASTEXITCODE -ne 0) { throw "核心自检失败" }
+  $test = Get-ChildItem -Path $buildDir -Recurse -Filter "mes-deployer-test.exe" -File -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($test) {
+    & $test.FullName
+    if ($LASTEXITCODE -ne 0) { throw "单元测试失败" }
+  }
+  Write-Host "自检与单元测试通过" -ForegroundColor Green
+}
 
 Write-Host ""
-Write-Host "构建完成：$exe" -ForegroundColor Green
-Write-Host ("大小：{0:N0} KB" -f ((Get-Item $exe).Length / 1KB))
-Write-Host ""
-Write-Host "直接运行试试：" -ForegroundColor Cyan
-Write-Host "  `"$exe`"            # 交互式菜单"
-Write-Host "  `"$exe`" --web      # 浏览器可视化控制台"
+Write-Host "运行：" -ForegroundColor Cyan
+Write-Host "  `"$target`"                 # 桌面 GUI（首次启动选择本地版 / 服务器版）"
+Write-Host "  `"$target`" --demo        # 演示模式（不联网、不写入真实目录）"
+Write-Host "  `"$target`" --self-test   # 核心自检"
