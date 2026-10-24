@@ -186,3 +186,65 @@ it("restores prior reviewed grades when a queued call cannot reserve a budget", 
       .get(submission.id),
   ).toMatchObject({ status: "failed", error: expect.stringContaining("保留") });
 });
+
+it("defers resource pressure without spending an attempt, then resumes", async () => {
+  let time = Date.now(),
+    pressured = true;
+  const queue = createRecognitionQueue(
+    db,
+    async () => {
+      if (pressured)
+        throw Object.assign(new Error("memory pressure"), { status: 503 });
+      return result;
+    },
+    { now: () => time, retryMs: 1 },
+  );
+  const job = queue.enqueue(submission, user);
+  await queue.tick();
+  expect(
+    db
+      .prepare("SELECT attempts,status FROM recognition_jobs WHERE id=?")
+      .get(job.id),
+  ).toMatchObject({ attempts: 0, status: "queued" });
+  pressured = false;
+  time += 100;
+  await queue.tick();
+  expect(
+    db.prepare("SELECT status FROM recognition_jobs WHERE id=?").get(job.id)!
+      .status,
+  ).toBe("succeeded");
+});
+
+it("keeps interrupted work recoverable during graceful shutdown", async () => {
+  let time = Date.now();
+  const queue = createRecognitionQueue(
+    db,
+    async (_job, { signal }) => {
+      await new Promise((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        }),
+      );
+      return result;
+    },
+    { now: () => time },
+  );
+  const job = queue.enqueue(submission, user);
+  const running = queue.tick();
+  queue.stop();
+  await running;
+  expect(
+    db
+      .prepare("SELECT attempts,status FROM recognition_jobs WHERE id=?")
+      .get(job.id),
+  ).toMatchObject({ attempts: 0, status: "queued" });
+  time += 6000;
+  const restarted = createRecognitionQueue(db, async () => result, {
+    now: () => time,
+  });
+  await restarted.tick();
+  expect(
+    db.prepare("SELECT status FROM recognition_jobs WHERE id=?").get(job.id)!
+      .status,
+  ).toBe("succeeded");
+});

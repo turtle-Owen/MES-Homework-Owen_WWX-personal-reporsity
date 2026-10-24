@@ -194,7 +194,7 @@ it("rejects aggregate upload size before parsing file content and cleans tempora
     json: () => {},
   };
   try {
-    validateUploads(
+    await validateUploads(
       { files: [{ path: file, size: 200 * 1024 * 1024 }] },
       response,
       () => {

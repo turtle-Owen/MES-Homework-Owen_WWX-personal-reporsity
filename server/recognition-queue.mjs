@@ -24,7 +24,7 @@ export function createRecognitionQueue(
   db,
   execute,
   {
-    concurrency = positiveLimit("OCR_CONCURRENCY", 2),
+    concurrency = positiveLimit("OCR_CONCURRENCY", 1),
     maxPending = positiveLimit("OCR_MAX_PENDING", 100),
     schoolPending = positiveLimit("OCR_SCHOOL_MAX_PENDING", 25),
     maxAttempts = 3,
@@ -201,7 +201,7 @@ export function createRecognitionQueue(
       }
     } catch (e) {
       if (!owns(job)) return;
-      const busy = e.code === "MODEL_BUSY";
+      const busy = stopped || e.code === "MODEL_BUSY" || e.status === 503;
       const retry =
         (busy || e.retryable === true) &&
         (busy || job.attempts < maxAttempts) &&

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { randomUUID, createHash } from "node:crypto";
 import { positive, uploadError } from "./upload-admission.mjs";
+import { requestJson } from "./io-guards.mjs";
 const ORIGIN = "https://api.deepseek.com";
 export function createDeepSeekFiles(
   db,
@@ -32,7 +33,7 @@ export function createDeepSeekFiles(
         .all(now());
       for (const row of records) {
         try {
-          const res = await request(
+          const { response: res, body } = await requestJson(
             `${ORIGIN}/files/${encodeURIComponent(row.remote_id)}`,
             {
               method: "DELETE",
@@ -42,8 +43,8 @@ export function createDeepSeekFiles(
                 authorization: `Bearer ${decrypt(row.encrypted_key, row.iv)}`,
               },
             },
+            { request, timeoutMs: 5000, idleMs: 5000, maxBytes: 65536 },
           );
-          const body = await res.json().catch(() => null);
           if (res.status === 404 || (res.ok && body?.deleted === true))
             db.prepare(
               "UPDATE provider_files SET status='deleted',encrypted_key='',iv='' WHERE id=?",
@@ -132,18 +133,21 @@ export function createDeepSeekFiles(
           blob,
           `${id}.${image.mimeType === "image/png" ? "png" : image.mimeType === "image/webp" ? "webp" : "jpg"}`,
         );
-        const response = await request(`${ORIGIN}/files`, {
-          method: "POST",
-          redirect: "error",
-          signal: AbortSignal.any([
-            AbortSignal.timeout(15000),
-            ...(signal ? [signal] : []),
-          ]),
-          headers: { authorization: `Bearer ${key}` },
-          body: form,
-        });
+        const { response, body: uploaded } = await requestJson(
+          `${ORIGIN}/files`,
+          {
+            method: "POST",
+            redirect: "error",
+            signal: AbortSignal.any([
+              AbortSignal.timeout(15000),
+              ...(signal ? [signal] : []),
+            ]),
+            headers: { authorization: `Bearer ${key}` },
+            body: form,
+          },
+          { request, timeoutMs: 15000, maxBytes: 65536 },
+        );
         if (!response.ok) throw uploadError("模型临时文件上传失败", 502);
-        const uploaded = await response.json();
         if (!/^file-api-[\w-]{1,200}$/.test(uploaded?.id || ""))
           throw uploadError("模型临时文件响应无效", 502);
         // Persist even if the caller was cancelled just as the response arrived.

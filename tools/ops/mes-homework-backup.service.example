@@ -1,0 +1,32 @@
+# Adapt user, paths, Node executable and EnvironmentFile before installing.
+[Unit]
+Description=Verified MES Homework snapshot and scheduled restore drill
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=mes-homework
+Group=mes-homework
+WorkingDirectory=/opt/mes-homework
+EnvironmentFile=/etc/mes-homework.env
+ExecStart=/usr/bin/node --max-old-space-size=256 tools/ops/backup.mjs run
+TimeoutStartSec=30min
+TimeoutStopSec=10s
+KillMode=control-group
+Nice=15
+IOSchedulingClass=idle
+IOWeight=10
+CPUQuota=25%
+MemoryMax=512M
+MemorySwapMax=0
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# Keep these consistent with DATA_DIR/BACKUP_DIR. SQLite is opened read-only,
+# but may need to create WAL/SHM sidecars when the API is not running.
+ReadWritePaths=/var/lib/mes-homework /var/backups/mes-homework
+# This unit never copies live WAL/SHM sidecars as a backup.
+StandardOutput=journal
+StandardError=journal

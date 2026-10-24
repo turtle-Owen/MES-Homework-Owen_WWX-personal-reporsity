@@ -4,15 +4,21 @@ import fs from "node:fs";
 import os from "node:os";
 import { createUploadAdmission } from "./upload-admission.mjs";
 afterEach(() => vi.unstubAllEnvs());
-it("bounds ingress before reading bytes and charges even failed transfer attempts", () => {
+it("bounds ingress before reading bytes and charges even failed transfer attempts", async () => {
   vi.stubEnv("UPLOAD_CONCURRENCY", "1");
   vi.stubEnv("UPLOAD_USER_DAILY_MB", "1");
   const db = new DatabaseSync(":memory:");
   db.exec(fs.readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
   const admission = createUploadAdmission(db, os.tmpdir());
+  await admission.ready;
   const user = { id: "u", school_id: "school" };
   try {
     const release = admission.acquire(user, "127.0.0.1");
+    expect(() =>
+      admission.acquire({ id: "other", school_id: "other" }, "127.0.0.2"),
+    ).toThrow(/正在上传/);
+    db.exec("UPDATE upload_writers SET expires_at=0");
+    // A still-running local writer cannot be replaced after its DB lease expires.
     expect(() =>
       admission.acquire({ id: "other", school_id: "other" }, "127.0.0.2"),
     ).toThrow(/正在上传/);
@@ -25,14 +31,16 @@ it("bounds ingress before reading bytes and charges even failed transfer attempt
     db.exec("UPDATE upload_writers SET expires_at=0");
     admission.acquire(user, "127.0.0.1")();
   } finally {
+    admission.stop();
     db.close();
   }
 });
-it("bounds scratch reservations, authenticates writers separately and recovers expired admission", () => {
+it("bounds scratch reservations, authenticates writers separately and recovers expired admission", async () => {
   vi.stubEnv("UPLOAD_SCRATCH_MB", "50");
   const db = new DatabaseSync(":memory:");
   db.exec(fs.readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
   const admission = createUploadAdmission(db, os.tmpdir());
+  await admission.ready;
   const user = { id: "u", school_id: "school" };
   try {
     const session = admission.reserve(user);
@@ -44,6 +52,7 @@ it("bounds scratch reservations, authenticates writers separately and recovers e
     );
     expect(admission.reserve(user).id).not.toBe(session.id);
   } finally {
+    admission.stop();
     db.close();
   }
 });

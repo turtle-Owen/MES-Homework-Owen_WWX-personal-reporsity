@@ -172,12 +172,15 @@ export function uploadType(buffer, claimed) {
   throw new Error("文件内容与支持的文件类型不符");
 }
 
-export function validateUploads(req, res, next) {
+export async function validateUploads(req, res, next) {
   const uploads = req.file ? [req.file] : req.files || [];
   const cleanup = () =>
-    uploads.forEach((file) => fs.rmSync(file.path, { force: true }));
-  res.once("finish", cleanup);
-  res.once("close", cleanup);
+    Promise.all(
+      uploads.map((file) => fs.promises.rm(file.path, { force: true })),
+    );
+  // The storage janitor retries failures without blocking the HTTP event loop.
+  res.once("finish", () => void cleanup().catch(() => {}));
+  res.once("close", () => void cleanup().catch(() => {}));
   try {
     const configured = Number(process.env.UPLOAD_TOTAL_MB);
     const maxBytes =
@@ -190,18 +193,18 @@ export function validateUploads(req, res, next) {
         { status: 413 },
       );
     for (const file of uploads) {
-      const fd = fs.openSync(file.path, "r");
+      const handle = await fs.promises.open(file.path, "r");
       const header = Buffer.alloc(16);
       try {
-        fs.readSync(fd, header, 0, header.length, 0);
+        await handle.read(header, 0, header.length, 0);
       } finally {
-        fs.closeSync(fd);
+        await handle.close();
       }
       file.safeExtension = uploadType(header, file.mimetype);
     }
     next();
   } catch (error) {
-    cleanup();
+    await cleanup().catch(() => {});
     res.status(error.status || 400).json({ error: error.message });
   }
 }

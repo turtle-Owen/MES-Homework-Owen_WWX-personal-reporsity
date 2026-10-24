@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly MES Homework backup
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5min
+Unit=mes-homework-backup.service
+
+[Install]
+WantedBy=timers.target

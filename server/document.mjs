@@ -26,6 +26,7 @@ export async function documentImages(filePath, mimeType, maxPages = 10) {
       );
     }
     const pages = [];
+    let encodedBytes = 0;
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
       const viewport = page.getViewport({ scale: 2 });
@@ -44,12 +45,19 @@ export async function documentImages(filePath, mimeType, maxPages = 10) {
         Math.ceil(viewport.height),
       );
       const canvasContext = canvas.getContext("2d");
-      await page.render({ canvas, canvasContext, viewport }).promise;
-      pages.push({
-        mimeType: "image/jpeg",
-        base64: canvas.toBuffer("image/jpeg", 88).toString("base64"),
-      });
-      page.cleanup();
+      try {
+        await page.render({ canvas, canvasContext, viewport }).promise;
+        const base64 = canvas.toBuffer("image/jpeg", 88).toString("base64");
+        encodedBytes += base64.length;
+        if (encodedBytes > 44 * 1024 * 1024)
+          throw new Error("PDF 解析图片合计过大，请拆分或压缩后重试");
+        pages.push({ mimeType: "image/jpeg", base64 });
+      } finally {
+        // Release native pixel storage promptly rather than waiting for GC.
+        canvas.width = 1;
+        canvas.height = 1;
+        page.cleanup();
+      }
     }
     if (typeof pdf.cleanup === "function") await pdf.cleanup();
     return pages;

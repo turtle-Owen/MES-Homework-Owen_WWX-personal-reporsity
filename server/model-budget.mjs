@@ -6,21 +6,22 @@ const positiveLimit = (name, fallback) => {
 };
 
 export function modelErrorStatus(error) {
-  return [409, 429].includes(error?.status) ? error.status : 502;
+  return [409, 429, 503].includes(error?.status) ? error.status : 502;
 }
 
 // Reserve before contacting a provider. SQLite makes quotas and active leases
 // shared by processes and persistent across restarts; failed calls count too.
-export function createModelBudget(db) {
+export function createModelBudget(db, { pressure } = {}) {
   const limits = {
     student: positiveLimit("MODEL_STUDENT_HOURLY_LIMIT", 20),
     staff: positiveLimit("MODEL_STAFF_HOURLY_LIMIT", 120),
     schoolHour: positiveLimit("MODEL_SCHOOL_HOURLY_LIMIT", 600),
     schoolDay: positiveLimit("MODEL_SCHOOL_DAILY_LIMIT", 3000),
-    globalConcurrency: positiveLimit("MODEL_GLOBAL_CONCURRENCY", 8),
-    concurrency: positiveLimit("MODEL_SCHOOL_CONCURRENCY", 4),
+    globalConcurrency: positiveLimit("MODEL_GLOBAL_CONCURRENCY", 2),
+    concurrency: positiveLimit("MODEL_SCHOOL_CONCURRENCY", 2),
   };
   return (userId) => {
+    pressure?.assertMemory();
     const now = Date.now();
     const user = db
       .prepare("SELECT school_id,role FROM users WHERE id=?")
@@ -83,7 +84,7 @@ export function createModelBudget(db) {
         userId,
         user.school_id,
         now,
-        now + 95000,
+        now + 150000,
       );
       db.exec("COMMIT");
     } catch (error) {
@@ -107,7 +108,7 @@ export function createModelBudget(db) {
           .prepare(
             "UPDATE model_usage SET lease_until=? WHERE id=? AND finished_at IS NULL AND lease_until>?",
           )
-          .run(now + 95000, id, now).changes
+          .run(now + 150000, id, now).changes
       )
         throw Object.assign(new Error("模型任务预留已过期，请重试"), {
           status: 429,
