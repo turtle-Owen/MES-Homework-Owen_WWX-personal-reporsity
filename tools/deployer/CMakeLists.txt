@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 # Apple 平台需要 Objective-C++（NSVisualEffectView 毛玻璃）；直接放进 project()
 # 可避免部分 CMake 版本在 configure 阶段报缺少 CMAKE_OBJCXX_COMPILE_OBJECT。
 if(APPLE)
-  project(mes-deployer VERSION 0.2.1 LANGUAGES C CXX OBJCXX)
+  project(mes-deployer VERSION 0.2.1 LANGUAGES C CXX OBJC OBJCXX)
 else()
   project(mes-deployer VERSION 0.2.1 LANGUAGES C CXX)
 endif()
@@ -14,6 +14,11 @@ set(CMAKE_C_STANDARD 11)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
+if(MSVC)
+  # 单文件、无 VC++ 运行库依赖：所有目标（含依赖库）统一静态 CRT。
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
 option(MES_DEPLOYER_TESTING "Build deployer unit tests" ON)

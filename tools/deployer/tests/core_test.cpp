@@ -153,15 +153,22 @@ void testCancelDeployment() {
 void testFailureFast() {
   section("部署引擎失败路径");
   const std::string installDir = uniqueTempPath("mes-coretest-fail");
+  const bool runtimeSupported = mes::core::detectPlatform().appRuntimeSupported;
   mes::core::Options badPort;
   badPort.port = 70000;
   badPort.installDir = installDir;
   std::atomic<bool> cancel{false};
   const mes::core::DeploymentResult portResult =
       mes::core::runDeployment(badPort, mes::core::RunCallbacks{}, cancel);
-  expect(!portResult.ok && !portResult.cancelled, "非法端口导致失败");
-  expect(portResult.error.find("端口") != std::string::npos,
-         "失败信息包含中文原因", portResult.error);
+  if (runtimeSupported) {
+    expect(!portResult.ok && !portResult.cancelled, "非法端口导致失败");
+    expect(portResult.error.find("端口") != std::string::npos,
+           "失败信息包含中文原因", portResult.error);
+  } else {
+    expect(!portResult.ok, "32 位系统拒绝部署（符合预期）");
+    expect(portResult.error.find("32 位") != std::string::npos,
+           "32 位系统错误提示为中文", portResult.error);
+  }
 
   mes::core::Options missingZip;
   missingZip.installDir = installDir;
@@ -170,8 +177,13 @@ void testFailureFast() {
   const mes::core::DeploymentResult zipResult =
       mes::core::runDeployment(missingZip, mes::core::RunCallbacks{}, cancel);
   expect(!zipResult.ok, "缺失本地安装包导致失败");
-  expect(zipResult.error.find("找不到本地安装包") != std::string::npos,
-         "缺失安装包错误为中文", zipResult.error);
+  if (runtimeSupported) {
+    expect(zipResult.error.find("找不到本地安装包") != std::string::npos,
+           "缺失安装包错误为中文", zipResult.error);
+  } else {
+    expect(zipResult.error.find("32 位") != std::string::npos,
+           "32 位系统错误提示为中文", zipResult.error);
+  }
   expect(!mes::platform::dirExists(installDir), "失败后不残留安装目录");
 }
 
