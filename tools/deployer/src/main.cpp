@@ -6,7 +6,11 @@
 
 #include <GLFW/glfw3.h>
 
-#if defined(__APPLE__)
+// MSVC 的 <GL/gl.h> 必须晚于 <windows.h>；Linux/macOS 直接包含系统 GL 头。
+#if defined(_WIN32)
+#include <windows.h>
+#include <GL/gl.h>
+#elif defined(__APPLE__)
 #include <OpenGL/gl3.h>
 #else
 #include <GL/gl.h>
@@ -16,10 +20,6 @@
 #include <cstring>
 #include <string>
 #include <vector>
-
-#if defined(_WIN32)
-#include <windows.h>
-#endif
 
 #include "app.h"
 #include "core/core.h"

@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
-project(mes-deployer VERSION 0.2.1 LANGUAGES C CXX)
+# Apple 平台需要 Objective-C++（NSVisualEffectView 毛玻璃）；直接放进 project()
+# 可避免部分 CMake 版本在 configure 阶段报缺少 CMAKE_OBJCXX_COMPILE_OBJECT。
+if(APPLE)
+  project(mes-deployer VERSION 0.2.1 LANGUAGES C CXX OBJCXX)
+else()
+  project(mes-deployer VERSION 0.2.1 LANGUAGES C CXX)
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -117,7 +123,6 @@ if(WIN32)
   list(APPEND MES_DEPLOYER_SOURCES
     src/platform/platform_win.cpp src/platform/http_win.cpp src/platform/window_win.cpp)
 elseif(APPLE)
-  enable_language(OBJCXX)
   set(CMAKE_OBJCXX_STANDARD 17)
   set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
   list(APPEND MES_DEPLOYER_SOURCES
@@ -140,6 +145,10 @@ target_link_libraries(mes-deployer PRIVATE mes-imgui mes-miniz glfw)
 if(WIN32)
   # MinGW 与 MSVC 都需要系统 HTTP/DWM/Shell 库；GLFW 的 GL 函数需 opengl32。
   target_link_libraries(mes-deployer PRIVATE opengl32 winhttp dwmapi shlwapi)
+elseif(UNIX AND NOT APPLE)
+  # main.cpp 直接调用 glViewport/glClear；Linux 需链接系统 libGL。
+  find_package(OpenGL REQUIRED)
+  target_link_libraries(mes-deployer PRIVATE OpenGL::GL)
 endif()
 
 if(WIN32)
