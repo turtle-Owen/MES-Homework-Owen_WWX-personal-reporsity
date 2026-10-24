@@ -1,6 +1,6 @@
 # Smart Campus Homework Analyzer · 校园作业分析
 
-**v0.2.0-rc1** | MIT License
+**v0.2.1-rc1** (build26102401) | MIT License
 
 [中文](README.md) | English
 
@@ -8,7 +8,24 @@ Smart Campus Homework Analyzer: upload homework, AI grades it; teacher review tu
 
 ---
 
-This is a full-stack version that can run on school or personal servers. Accounts, schools, students, knowledge bases, homework, OCR, teacher review, mistake notebooks, exam papers, and AI teaching analysis all use persistent data.
+This is a full-stack version that can run on school or personal servers. Accounts, schools, students, knowledge bases, homework, OCR, teacher review, mistake notebooks, exam papers, parent dashboards, and AI teaching analysis all use persistent data.
+
+## What's New in v0.2.1-rc1 (build26102401)
+
+1. **Three teacher-selectable review modes**: review every question, review only uncertain items (high-confidence AI verdicts pass automatically), or no review (AI result is published immediately; incomplete model output still falls back to human review).
+2. **Explain the grade**: every graded item shows the result, the reference answer, and the AI's reasoning (why it was marked right/wrong). Visible in teacher review and the parent submission detail.
+3. **OAuth model links alongside API Keys**: ChatGPT (OpenAI), Claude (Anthropic), Gemini (Google) — with an explicit "not available in mainland China" confirmation before redirecting — plus WorkBuddy, Qwen, 千问 (China), and DeepSeek (Platform). OAuth 2.0 authorization code + PKCE, encrypted token storage, refresh and disconnect. Client IDs/endpoints are configured by the deployment admin via environment variables.
+4. **Account-name registration with role selection**: school / teacher / student / parent, login by account name (legacy email logins still work). `ALLOW_PUBLIC_REGISTRATION=0` restores admin-only account creation.
+5. **Parent portal**: dashboard of the linked child's reviewed homework, scores, weak knowledge points, error causes, trends and per-question grading detail, plus one-click AI learning analysis.
+6. **School-managed model modes**: school-wide credentials, teacher-separate + class-fund (students/parents use the class head teacher's credential), or teacher-separate + parent-separate (students use their linked parent's credential).
+7. **Grading without uploading the original questions**: create a "direct AI grading" homework with just a title and an optional content description; AI segments the student's work, derives reference answers, grades and explains.
+8. **Guided mistake notebook**: students see a thinking prompt, progressive hints, and a redo box first; the reference answer is revealed only after they get it right (with a fallback after three attempts), followed by similar practice questions.
+
+> Direct-grading homework uses per-submission AI question snapshots, so it does not feed the class-level AI teaching analysis (which aggregates a shared question bank). The parent learning analysis works for both modes.
+
+### OAuth model configuration (deployment admin)
+
+OAuth uses Authorization Code + PKCE. Register the callback `<your domain>/api/oauth/<provider>/callback` with each vendor and provide `OAUTH_<ID>_CLIENT_ID` / `OAUTH_<ID>_CLIENT_SECRET` (and the authorize/token/API endpoint variables for WorkBuddy, Qwen, 千问 and DeepSeek). See `.env.example` for every variable name. Unconfigured providers show as "not configured" with the missing variable names and do not affect the API Key path. ChatGPT / Claude / Gemini are not available in mainland China; the UI asks for confirmation before redirecting.
 
 ## What's New in v0.2.0-rc1: AI Teaching Analysis
 
@@ -65,9 +82,11 @@ npm start
 
 For development, run `npm run dev:server` and `npm run dev` separately, then visit `http://127.0.0.1:5173`. Production server listens on `127.0.0.1:8787` by default; use `HOST=0.0.0.0` to allow LAN access. Data is stored in `data/smart-campus.sqlite`, with original files in `data/uploads/`.
 
-## Security update (2026-10-17)
+## Security update (2026-10-24, v0.2.1-rc1)
 
-School administrators must create teacher accounts; public registration is student-only. Students cannot change their own stage/class. Submission files and answers require the submitting student, owning teacher, or school administrator. Student assignment responses omit reference answers. Re-recognition requires fresh teacher approval.
+Registration is now account-name + password + role selection; teachers/students/parents may self-register with a school code (requirement 4). Set `ALLOW_PUBLIC_REGISTRATION=0` to restore administrator-only account creation. A school code is not an identity credential: students cannot change their own stage/class, teachers only see their own assignments and school knowledge base, parents only see linked children, and every query stays scoped by school and account. Submission files and answers require the submitting student, owning teacher, linked parent, or school administrator; student assignment responses and the guided mistake notebook never expose reference answers directly; re-recognition requires fresh teacher approval (except when the selected review mode auto-completes).
+
+OAuth model links use Authorization Code + PKCE with one-time state validation. Tokens use the same AES-256-GCM encryption as API keys, are refreshed on expiry, and can be disconnected. Redirects are restricted to `APP_ORIGIN`/`OAUTH_REDIRECT_BASE` with no open redirects. ChatGPT, Claude and Gemini are not available in mainland China; the UI warns explicitly before redirecting.
 
 Model endpoints are restricted to the selected vendor's HTTPS origin. Deployment administrators may approve exact custom origins in comma-separated `PROVIDER_ALLOWED_ORIGINS`; existing stored endpoints are also checked on every call. Do not approve user-controlled domains or private-network addresses. Worker/reverse-proxy deployments must set `APP_ORIGIN=https://your-frontend-domain` on the API server, without a path or trailing slash. Client-supplied forwarding headers are not trusted. Production requires a valid `APP_SECRET` and HTTPS (Secure session cookies).
 
@@ -75,14 +94,15 @@ Environment variables must be passed to the process; start with `node --env-file
 
 ## Recommended Workflow
 
-1. Select "Register New School" and fill in school and administrator details.
-2. Download the template from "Student Management" and import students, or create accounts individually.
-3. Maintain your school's actual knowledge points in "Knowledge Base."
-4. Upload images, PDFs, or Word files in "New Homework" to generate drafts; complete answers, scores, and knowledge points before publishing.
-5. Teachers or students select the official assignment and upload student answer sheets.
-6. Teachers start page-by-page OCR in "Recognition & Review" and confirm each question.
-7. Confirmed mistakes enter the corresponding student accounts and the mistake-based exam paper pool.
-8. In "AI Teaching Analysis," select this assignment to generate review plans, error cause statistics, and student follow-up lists.
+1. Register the school, then use "School Dashboard" to choose the model mode, assign class head teachers, and configure school credentials.
+2. Teachers/students/parents register with the school code and account name (or the administrator creates accounts / imports students).
+3. Parents bind a child from the "Child Dashboard" using the child's account name and password.
+4. Maintain your school's actual knowledge points in "Knowledge Base."
+5. In "New Homework", either upload originals to generate a question draft, or choose "Direct AI grading" with just a title and an optional description.
+6. Choose the review mode, then have students upload answer sheets and start page-by-page OCR.
+7. Review all questions or only uncertain ones, or let the system publish the AI result; the grade, reference answer and AI reasoning are shown together.
+8. Confirmed mistakes enter the student notebook, where students think → get hints → redo → see the reference answer → practise similar questions.
+9. Use "AI Teaching Analysis" for question-bank assignments, and the parent dashboard for AI learning analysis.
 
 ## Submission and grading fixes (2026-10-17)
 

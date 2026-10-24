@@ -32,6 +32,10 @@ export function createRecognitionQueue(
     retryMs = 5000,
     now = Date.now,
     canStart = () => true,
+    // Optional hooks let the API layer persist richer results (per-submission
+    // question lists, automatic review) without teaching the queue about them.
+    publish = null,
+    afterPublish = null,
   } = {},
 ) {
   let stopped = false;
@@ -186,9 +190,11 @@ export function createRecognitionQueue(
       db.exec("BEGIN IMMEDIATE");
       try {
         assertLease();
-        db.prepare(
-          "UPDATE submissions SET status='review',teacher_reviewed=0,score=NULL,ocr_text=?,analysis_json=? WHERE id=?",
-        ).run(result.ocrText || "", JSON.stringify(result), job.submission_id);
+        if (publish) publish(job, result);
+        else
+          db.prepare(
+            "UPDATE submissions SET status='review',teacher_reviewed=0,score=NULL,ocr_text=?,analysis_json=? WHERE id=?",
+          ).run(result.ocrText || "", JSON.stringify(result), job.submission_id);
         db.prepare(
           "UPDATE recognition_jobs SET status='succeeded',token=NULL,lease_until=NULL,error=NULL,error_status=NULL,updated_at=? WHERE id=?",
         ).run(now(), job.id);
@@ -199,6 +205,13 @@ export function createRecognitionQueue(
       } catch (e) {
         db.exec("ROLLBACK");
         throw e;
+      }
+      if (afterPublish) {
+        try {
+          afterPublish(job, result);
+        } catch (error) {
+          console.error("recognition afterPublish hook failed:", error.message);
+        }
       }
     } catch (e) {
       if (!owns(job)) return;
@@ -304,3 +317,4 @@ export function createRecognitionQueue(
     },
   };
 }
+
