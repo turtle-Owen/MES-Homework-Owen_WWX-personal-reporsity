@@ -1,4 +1,5 @@
 import { it, expect, vi, afterEach } from "vitest";
+import { createResourcePressure } from "./resource-pressure.mjs";
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import os from "node:os";
@@ -9,7 +10,12 @@ it("bounds ingress before reading bytes and charges even failed transfer attempt
   vi.stubEnv("UPLOAD_USER_DAILY_MB", "1");
   const db = new DatabaseSync(":memory:");
   db.exec(fs.readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
-  const admission = createUploadAdmission(db, os.tmpdir());
+  const admission = createUploadAdmission(db, os.tmpdir(), {
+    pressure: createResourcePressure(os.tmpdir(), {
+      systemProbe: async () => ({ supported: false }),
+      publish: false,
+    }),
+  });
   await admission.ready;
   const user = { id: "u", school_id: "school" };
   try {
@@ -39,7 +45,12 @@ it("bounds scratch reservations, authenticates writers separately and recovers e
   vi.stubEnv("UPLOAD_SCRATCH_MB", "50");
   const db = new DatabaseSync(":memory:");
   db.exec(fs.readFileSync(new URL("./schema.sql", import.meta.url), "utf8"));
-  const admission = createUploadAdmission(db, os.tmpdir());
+  const admission = createUploadAdmission(db, os.tmpdir(), {
+    pressure: createResourcePressure(os.tmpdir(), {
+      systemProbe: async () => ({ supported: false }),
+      publish: false,
+    }),
+  });
   await admission.ready;
   const user = { id: "u", school_id: "school" };
   try {

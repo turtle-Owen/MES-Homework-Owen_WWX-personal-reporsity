@@ -1,5 +1,4 @@
-import { documentImages } from "./document.mjs";
-import { extractWordDocument, isWordDocument } from "./word.mjs";
+import { isWordDocument } from "./document-types.mjs";
 process.once("disconnect", () => process.exit(0));
 process.once("message", async (workerData) => {
   try {
@@ -16,6 +15,7 @@ process.once("message", async (workerData) => {
       warnings = [];
     for (const [index, file] of workerData.entries()) {
       if (isWordDocument(file.file_type, file.file_path)) {
+        const { extractWordDocument } = await import("./word.mjs");
         const word = await extractWordDocument(
           file.file_path,
           file.file_type,
@@ -27,7 +27,8 @@ process.once("message", async (workerData) => {
       } else if (file.file_type !== "application/pdf") {
         // Immutable photos need no decoding or worker-to-parent Base64 copy.
         images.push({ mimeType: file.file_type, filePath: file.file_path });
-      } else
+      } else {
+        const { documentImages } = await import("./document.mjs");
         images.push(
           ...(await documentImages(
             file.file_path,
@@ -35,6 +36,7 @@ process.once("message", async (workerData) => {
             10 - images.length,
           )),
         );
+      }
       if (
         images.reduce((sum, image) => sum + (image.base64?.length || 0), 0) >
         44 * 1024 * 1024

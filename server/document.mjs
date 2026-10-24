@@ -66,8 +66,4 @@ export async function documentImages(filePath, mimeType, maxPages = 10) {
   }
 }
 
-export function cleanModelJson(value) {
-  const text = String(value || "").trim();
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  return JSON.parse(fenced ? fenced[1].trim() : text);
-}
+export { cleanModelJson } from "./model-json.mjs";

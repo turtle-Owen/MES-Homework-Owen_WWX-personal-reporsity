@@ -2,6 +2,8 @@
 
 上传超时、内存准入、解析进程隔离、自动重启部署和故障测试记录见 [RESILIENCE.md](RESILIENCE.md)。
 
+多核执行方式、异步密码哈希、SQL 语句缓存和动态降载见 [PERFORMANCE.md](PERFORMANCE.md)。
+
 本轮改善保留 Node.js 24、单机 SQLite 和本地附件目录。没有迁移到 PostgreSQL/对象存储，也没有证明可承载一万人同时使用。先用隔离环境测量，再决定扩容。不要把同一 DATA_DIR 放到网络文件系统，也不要将多个独立本地数据库当成同一集群。
 
 ## 后台识别

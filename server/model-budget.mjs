@@ -62,7 +62,9 @@ export function createModelBudget(db, { pressure } = {}) {
       if (
         usage.user_active ||
         usage.school_active >= limits.concurrency ||
-        globalActive >= limits.globalConcurrency
+        globalActive >=
+          (pressure?.limit(limits.globalConcurrency) ??
+            limits.globalConcurrency)
       )
         throw Object.assign(new Error("模型任务正在进行，请等待完成后重试"), {
           status: 429,

@@ -12,6 +12,7 @@ export function recognitionFiles(
     entry = new URL("./recognition-files-worker.mjs", import.meta.url),
     rssMB = 512,
     intervalMs = 250,
+    admission = () => {},
   } = {},
 ) {
   if (signal?.aborted) return Promise.reject(signal.reason);
@@ -37,6 +38,11 @@ export function recognitionFiles(
         code: "MODEL_BUSY",
       }),
     );
+  try {
+    admission();
+  } catch (error) {
+    return Promise.reject(error);
+  }
   return new Promise((resolve, reject) => {
     const child = fork(
       entry instanceof URL ? fileURLToPath(entry) : entry,

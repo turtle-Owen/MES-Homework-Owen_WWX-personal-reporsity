@@ -506,6 +506,20 @@ function SchoolDashboard({
               小时 {operations.modelUsage.callsLastHour} 次，当前调用{" "}
               {operations.modelUsage.active} 个。失败调用也计入用量。
             </p>
+            {operations.resources && (
+              <p>
+                服务资源状态：
+                {operations.resources.level === "critical"
+                  ? "暂停新增上传和识别"
+                  : operations.resources.level === "limited"
+                    ? "降载运行"
+                    : "正常"}
+                。应用内存约 {operations.resources.rssMiB} MiB。
+                {operations.resources.systemSupported
+                  ? `可用内存预算约 ${operations.resources.availableMiB} MiB。`
+                  : "系统指标不可用，仍保留进程内存保护。"}
+              </p>
+            )}
             {operations.costBudget?.enabled && (
               <p>
                 费用预算已用或预留{" "}

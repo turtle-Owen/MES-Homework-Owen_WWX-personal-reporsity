@@ -20,15 +20,16 @@ Environment=UPLOAD_CONCURRENCY=2
 Environment=MODEL_GLOBAL_CONCURRENCY=2
 Environment=MODEL_SCHOOL_CONCURRENCY=2
 Environment=OCR_CONCURRENCY=1
+Environment=UV_THREADPOOL_SIZE=4
 ExecStart=/usr/bin/node tools/ops/supervise.mjs
 Restart=always
 RestartSec=5
 TimeoutStopSec=20
 KillMode=control-group
 MemoryAccounting=true
-MemoryHigh=2G
-MemoryMax=3G
-MemorySwapMax=0
+MemoryHigh=1792M
+MemoryMax=2560M
+MemorySwapMax=256M
 OOMPolicy=kill
 TasksMax=128
 LimitNOFILE=8192

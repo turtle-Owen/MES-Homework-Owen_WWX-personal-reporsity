@@ -9,15 +9,19 @@ User=mes-homework
 Group=mes-homework
 WorkingDirectory=/opt/mes-homework
 EnvironmentFile=/etc/mes-homework.env
-ExecStart=/usr/bin/node --max-old-space-size=256 tools/ops/backup.mjs run
+ExecStart=/usr/bin/node --max-old-space-size=128 tools/ops/backup.mjs run
 TimeoutStartSec=30min
 TimeoutStopSec=10s
+Restart=on-failure
+RestartSec=10min
+# Pressure exits with 75; ordinary configuration/data failures exit with 1.
+RestartPreventExitStatus=1
 KillMode=control-group
 Nice=15
 IOSchedulingClass=idle
 IOWeight=10
 CPUQuota=25%
-MemoryMax=512M
+MemoryMax=256M
 MemorySwapMax=0
 UMask=0077
 NoNewPrivileges=true

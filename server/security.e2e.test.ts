@@ -135,6 +135,7 @@ beforeAll(async () => {
       PORT: String(port),
       HOST: "127.0.0.1",
       NODE_ENV: "test",
+      SYSTEM_PRESSURE_ENABLED: "0",
       CLIENT_TILING_ENABLED: "0",
       DEEPSEEK_FILES_ENABLED: "0",
       MODEL_SCHOOL_DAILY_MICRO_CNY: "0",
