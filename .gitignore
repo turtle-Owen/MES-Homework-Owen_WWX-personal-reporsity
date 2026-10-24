@@ -10,6 +10,8 @@ dist/
 .sites-runtime/
 .npm-cache/
 data/
+backups/
+.backup-data/
 .wrangler/
 .tmp-rc5/
 .tmp-rc5-admin/
