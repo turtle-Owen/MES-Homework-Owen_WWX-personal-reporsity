@@ -3,15 +3,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { setImmediate as yieldIO } from "node:timers/promises";
 
-const hash = (file) => {
+const hash = (file, checkpoint = () => {}) => {
   const digest = createHash("sha256"),
     buffer = Buffer.alloc(65536);
   const fd = fs.openSync(file, "r");
   try {
     let read;
-    while ((read = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0)
+    while ((read = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      checkpoint();
       digest.update(buffer.subarray(0, read));
+    }
     return digest.digest("hex");
   } finally {
     fs.closeSync(fd);
@@ -76,6 +79,7 @@ export async function createBackup(
     minFreeBytes = 0,
     spaceCopies = 1,
     createdAt = new Date().toISOString(),
+    checkpoint = () => {},
   } = {},
 ) {
   source = path.resolve(source);
@@ -92,6 +96,7 @@ export async function createBackup(
   fs.mkdirSync(stage, { recursive: true, mode: 0o700 });
   let db, snapshot;
   try {
+    checkpoint();
     db = new DatabaseSync(path.join(source, "smart-campus.sqlite"), {
       readOnly: true,
     });
@@ -107,6 +112,7 @@ export async function createBackup(
     await backup(db, path.join(stage, "smart-campus.sqlite"), {
       rate: 64,
       progress: ({ totalPages }) => {
+        checkpoint();
         if (totalPages * pageSize > maxBytes)
           throw new Error("数据库备份超过大小上限");
       },
@@ -124,6 +130,7 @@ export async function createBackup(
     let estimate = copiedDatabaseBytes;
     const seen = new Set();
     for (const row of rows) {
+      checkpoint();
       const relative = path
         .relative(source, row.file_path)
         .split(path.sep)
@@ -145,6 +152,7 @@ export async function createBackup(
     const paths = new Map();
     fs.mkdirSync(path.join(stage, "uploads"), { mode: 0o700 });
     for (const row of rows) {
+      checkpoint();
       const relative = path
         .relative(source, row.file_path)
         .split(path.sep)
@@ -153,6 +161,8 @@ export async function createBackup(
         throw new Error("附件不在数据目录 uploads 下");
       if (paths.has(relative)) continue;
       const original = safeFile(source, relative);
+      await yieldIO();
+      checkpoint();
       fs.mkdirSync(path.dirname(path.join(stage, relative)), {
         recursive: true,
         mode: 0o700,
@@ -160,7 +170,7 @@ export async function createBackup(
       fs.copyFileSync(original, path.join(stage, relative));
       fs.chmodSync(path.join(stage, relative), 0o600);
       syncFile(path.join(stage, relative));
-      paths.set(relative, hash(path.join(stage, relative)));
+      paths.set(relative, hash(path.join(stage, relative), checkpoint));
     }
     snapshot.close();
     snapshot = null;
@@ -168,7 +178,7 @@ export async function createBackup(
     syncFile(path.join(stage, "smart-campus.sqlite"));
     paths.set(
       "smart-campus.sqlite",
-      hash(path.join(stage, "smart-campus.sqlite")),
+      hash(path.join(stage, "smart-campus.sqlite"), checkpoint),
     );
     fs.writeFileSync(
       path.join(stage, "manifest.json"),
@@ -213,7 +223,8 @@ export async function createBackup(
     snapshot?.close();
   }
 }
-export function verifyBackup(source) {
+export function verifyBackup(source, { checkpoint = () => {} } = {}) {
+  checkpoint();
   source = path.resolve(source);
   const wal = path.join(source, "smart-campus.sqlite-wal");
   if (fs.existsSync(wal) && fs.statSync(wal).size > 0)
@@ -234,12 +245,13 @@ export function verifyBackup(source) {
     throw new Error("备份清单无效");
   let bytes = 0;
   for (const [relative, expected] of Object.entries(manifest.files)) {
+    checkpoint();
     if (relative !== "smart-campus.sqlite" && !relative.startsWith("uploads/"))
       throw new Error("备份包含未知文件");
     if (
       typeof expected !== "string" ||
       !/^[a-f0-9]{64}$/.test(expected) ||
-      hash(safeFile(source, relative)) !== expected
+      hash(safeFile(source, relative), checkpoint) !== expected
     )
       throw new Error("备份文件校验失败");
     bytes += fs.statSync(safeFile(source, relative)).size;
@@ -262,18 +274,24 @@ export function verifyBackup(source) {
   }
   return { manifest, bytes, files: Object.keys(manifest.files).length };
 }
-export function restoreBackup(source, destination) {
+export function restoreBackup(
+  source,
+  destination,
+  { checkpoint = () => {} } = {},
+) {
+  checkpoint();
   source = path.resolve(source);
   destination = path.resolve(destination);
   if (fs.existsSync(destination))
     throw new Error("恢复目标已存在；禁止覆盖现有数据");
-  const { manifest } = verifyBackup(source);
+  const { manifest } = verifyBackup(source, { checkpoint });
   const stage = destination + ".partial-" + randomUUID();
   fs.mkdirSync(stage, { recursive: true, mode: 0o700 });
   let db;
   try {
     fs.mkdirSync(path.join(stage, "uploads"), { mode: 0o700 });
     for (const relative of Object.keys(manifest.files)) {
+      checkpoint();
       const target = path.join(stage, relative);
       fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
       fs.copyFileSync(safeFile(source, relative), target);
@@ -292,6 +310,7 @@ export function restoreBackup(source, destination) {
     db.exec("BEGIN IMMEDIATE");
     const moved = new Set();
     for (const row of references(db)) {
+      checkpoint();
       if (moved.has(row.file_path)) continue;
       moved.add(row.file_path);
       const relative = path

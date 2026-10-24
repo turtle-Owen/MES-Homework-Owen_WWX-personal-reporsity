@@ -247,6 +247,7 @@ it("runs the CLI in a separate process while WAL writes continue, then checks st
   const script = path.resolve(import.meta.dirname, "../tools/ops/backup.mjs");
   const env = {
     ...process.env,
+    SYSTEM_PRESSURE_ENABLED: "0",
     DATA_DIR: source,
     BACKUP_DIR: backups,
     BACKUP_MIN_FREE_MB: "1",
@@ -312,3 +313,49 @@ it("runs the CLI in a separate process while WAL writes continue, then checks st
   });
   expect((await once(failed, "exit"))[0]).toBe(1);
 }, 15000);
+
+it("defers a backup under pressure without pruning its last good snapshot", async () => {
+  const first = await runBackup(config);
+  const gate = {
+    ready: Promise.resolve(),
+    check() {
+      throw Object.assign(new Error("resource pressure"), {
+        code: "BACKUP_DEFERRED",
+      });
+    },
+    stop() {},
+  };
+  await expect(runBackup(config, { gate })).rejects.toMatchObject({
+    code: "BACKUP_DEFERRED",
+  });
+  const state = backupStatus(config);
+  expect(state.state).toBe("deferred");
+  expect(state.lastSnapshot).toBe(first.lastSnapshot);
+  expect(state.healthy).toBe(true);
+  expect(fs.existsSync(path.join(backups, first.lastSnapshot))).toBe(true);
+  expect((await runBackup(config)).state).toBe("succeeded");
+});
+
+it("handles pressure raised during SQLite snapshot copying without deleting the last good copy", async () => {
+  const first = await runBackup(config);
+  db.exec(
+    "CREATE TABLE pressure_padding AS WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<300) SELECT zeroblob(8192) payload FROM n",
+  );
+  let checks = 0;
+  const gate = {
+    ready: Promise.resolve(),
+    check() {
+      if (++checks >= 3)
+        throw Object.assign(new Error("pressure during copy"), {
+          code: "BACKUP_DEFERRED",
+        });
+    },
+    stop() {},
+  };
+  await expect(runBackup(config, { gate })).rejects.toMatchObject({
+    code: "BACKUP_DEFERRED",
+  });
+  expect(checks).toBeGreaterThanOrEqual(3);
+  expect(fs.existsSync(path.join(backups, first.lastSnapshot))).toBe(true);
+  expect(backupStatus(config).state).toBe("deferred");
+});

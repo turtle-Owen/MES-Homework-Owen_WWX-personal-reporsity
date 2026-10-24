@@ -22,8 +22,6 @@ import {
   createHash,
   randomBytes,
   randomUUID,
-  scryptSync,
-  scrypt,
   timingSafeEqual,
   createCipheriv,
   createDecipheriv,
@@ -32,8 +30,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { providers, publicProviders } from "./providers.mjs";
-import { cleanModelJson } from "./document.mjs";
-import { isWordDocument } from "./word.mjs";
+import { cleanModelJson } from "./model-json.mjs";
+import { isWordDocument } from "./document-types.mjs";
+import { createPasswordHasher } from "./passwords.mjs";
+import { cacheStatements } from "./statement-cache.mjs";
 import {
   buildAssignmentStats,
   buildStudentStats,
@@ -75,7 +75,9 @@ const data = path.resolve(process.env.DATA_DIR || path.join(root, "data"));
 const files = path.join(data, "uploads");
 fs.mkdirSync(files, { recursive: true });
 const db = new DatabaseSync(path.join(data, "smart-campus.sqlite"));
-db.exec("PRAGMA busy_timeout=5000");
+db.exec(
+  `PRAGMA busy_timeout=${Math.min(positive("SQLITE_BUSY_TIMEOUT_MS", 250), 1000)}`,
+);
 db.exec(fs.readFileSync(path.join(root, "server/schema.sql"), "utf8"));
 if (
   !db
@@ -120,6 +122,8 @@ if (
   db.exec(
     "ALTER TABLE teaching_analyses ADD COLUMN source_revision TEXT NOT NULL DEFAULT ''",
   );
+const statements = cacheStatements(db);
+const passwords = createPasswordHasher();
 const pressure = createResourcePressure(data);
 await pressure.ready;
 const reserveModel = createModelBudget(db, { pressure });
@@ -214,7 +218,8 @@ const APP_VERSION = "v0.2.0-rc1";
 const secret = createHash("sha256")
   .update(process.env.APP_SECRET || "development-only-change-me")
   .digest();
-const pass = (p, s) => scryptSync(p, s, 64).toString("hex");
+const pass = (password, salt, batch = false) =>
+  passwords.hash(password, salt, { signal: requestSignal(), batch });
 const parseCookies = (req) =>
   Object.fromEntries(
     (req.headers.cookie || "")
@@ -437,13 +442,14 @@ async function askModel(
   }
 }
 
-function makeSchoolAndTeacher(x) {
+async function makeSchoolAndTeacher(x) {
   if (!x.schoolName || !x.name || !x.email || !validPassword(x.password)) {
     throw new Error("请完整填写学校与管理员信息，密码至少 8 位");
   }
   const school = { id: uid(), name: String(x.schoolName).trim() };
   const id = uid();
   const salt = randomBytes(16).toString("hex");
+  const hash = await pass(x.password, salt);
   db.exec("BEGIN");
   try {
     db.prepare("INSERT INTO schools VALUES(?,?,?)").run(
@@ -459,7 +465,7 @@ function makeSchoolAndTeacher(x) {
       "teacher",
       String(x.name).trim(),
       String(x.email).trim().toLowerCase(),
-      pass(x.password, salt),
+      hash,
       salt,
       null,
       null,
@@ -483,9 +489,9 @@ app.get("/api/health", (_q, r) =>
   }),
 );
 app.get("/api/providers", (_q, r) => r.json(publicProviders()));
-app.post("/api/schools/register", (req, res) => {
+app.post("/api/schools/register", async (req, res) => {
   try {
-    const created = makeSchoolAndTeacher(req.body);
+    const created = await makeSchoolAndTeacher(req.body);
     setSession(res, created.id);
     res.json({
       ok: true,
@@ -493,7 +499,7 @@ app.post("/api/schools/register", (req, res) => {
       schoolName: created.school.name,
     });
   } catch (error) {
-    res.status(400).json({
+    res.status(error.status || 400).json({
       error: String(error).includes("UNIQUE")
         ? "管理员邮箱已注册"
         : error.message || "学校注册失败",
@@ -507,7 +513,7 @@ app.post("/api/auth/register", (_req, res) => {
     .status(403)
     .json({ error: "学生账户须由学校管理员或教师创建，请联系学校领取账户" });
 });
-app.post("/api/auth/login", (req, res) => {
+app.post("/api/auth/login", async (req, res) => {
   if (
     typeof req.body.password !== "string" ||
     Buffer.byteLength(req.body.password) > 1024
@@ -517,7 +523,7 @@ app.post("/api/auth/login", (req, res) => {
     .prepare("SELECT * FROM users WHERE email=?")
     .get(String(req.body.email || "").toLowerCase());
   if (!u) return res.status(401).json({ error: "邮箱或密码错误" });
-  const a = Buffer.from(pass(req.body.password || "", u.salt), "hex"),
+  const a = Buffer.from(await pass(req.body.password || "", u.salt), "hex"),
     b = Buffer.from(u.password_hash, "hex");
   if (a.length !== b.length || !timingSafeEqual(a, b))
     return res.status(401).json({ error: "邮箱或密码错误" });
@@ -628,7 +634,7 @@ app.get("/api/teachers", auth, schoolAdmin, (req, res) =>
       .all(req.user.school_id),
   ),
 );
-app.post("/api/teachers", auth, schoolAdmin, (req, res) => {
+app.post("/api/teachers", auth, schoolAdmin, async (req, res) => {
   try {
     const x = req.body;
     if (
@@ -652,7 +658,7 @@ app.post("/api/teachers", auth, schoolAdmin, (req, res) => {
       "teacher",
       String(x.name).trim(),
       String(x.email).trim().toLowerCase(),
-      pass(x.password, salt),
+      await pass(x.password, salt),
       salt,
       x.stage,
       String(x.subject).trim(),
@@ -661,7 +667,7 @@ app.post("/api/teachers", auth, schoolAdmin, (req, res) => {
     );
     res.json({ id });
   } catch (error) {
-    res.status(400).json({
+    res.status(error.status || 400).json({
       error: String(error).includes("UNIQUE") ? "邮箱已注册" : "教师注册失败",
     });
   }
@@ -675,7 +681,7 @@ app.get("/api/students", auth, schoolStaff, (req, res) =>
       .all(req.user.school_id),
   ),
 );
-app.post("/api/students", auth, schoolStaff, (req, res) => {
+app.post("/api/students", auth, schoolStaff, async (req, res) => {
   try {
     const x = req.body;
     if (!x.name || !x.email || !validPassword(x.password))
@@ -695,7 +701,7 @@ app.post("/api/students", auth, schoolStaff, (req, res) => {
       "student",
       String(x.name).trim(),
       String(x.email).trim().toLowerCase(),
-      pass(x.password, salt),
+      await pass(x.password, salt),
       salt,
       stage,
       null,
@@ -704,7 +710,7 @@ app.post("/api/students", auth, schoolStaff, (req, res) => {
     );
     res.json({ id });
   } catch (error) {
-    res.status(400).json({
+    res.status(error.status || 400).json({
       error: String(error).includes("UNIQUE") ? "邮箱已注册" : "学生注册失败",
     });
   }
@@ -731,6 +737,7 @@ app.post(
           },
         ],
         signal,
+        { admission: () => pressure.assertParser() },
       );
       const headers = (table[0] || []).map((value) =>
         String(value || "").trim(),
@@ -792,11 +799,7 @@ app.post(
             "student",
             name,
             email,
-            await new Promise((resolve, reject) =>
-              scrypt(initialPassword, salt, 64, (error, key) =>
-                error ? reject(error) : resolve(key.toString("hex")),
-              ),
-            ),
+            await pass(initialPassword, salt, true),
             salt,
             stage,
             null,
@@ -805,6 +808,7 @@ app.post(
           );
           created.push({ row: index + 2, id, name, email, initialPassword });
         } catch (error) {
+          if (error.status === 503 || signal.aborted) throw error;
           errors.push({
             row: index + 2,
             name,
@@ -817,7 +821,9 @@ app.post(
       }
       res.json({ total: rows.length, created, errors });
     } catch (error) {
-      res.status(400).json({ error: `无法读取学生名单：${error.message}` });
+      res
+        .status(error.status || 400)
+        .json({ error: `无法读取学生名单：${error.message}` });
     }
   },
 );
@@ -870,6 +876,7 @@ app.post(
       const { images, documentText, warnings } = await recognitionFiles(
         [{ file_path: req.file.path, file_type: req.file.mimetype }],
         signal,
+        { admission: () => pressure.assertParser() },
       );
       const word = isWordDocument(req.file.mimetype, req.file.originalname)
         ? { text: documentText, warnings }
@@ -1255,17 +1262,23 @@ async function recognizeSubmission(
         })),
         documentText: "",
       }
-    : await recognitionFiles(submissionFiles(s), signal);
+    : await recognitionFiles(submissionFiles(s), signal, {
+        admission: () => pressure.assertParser(),
+      });
   assertLease();
   const prompt = `学校作业 OCR、自动批改与个性化练习。学段=${s.stage}，学科=${s.subject}。\n教师已经录入的正式题目=${JSON.stringify(qs)}。\n${documentText ? `答卷文字（按附件顺序）：\n${documentText}\n` : "学生答卷页面已附在消息中。"}\n规则：1. 忠实识别学生实际填写内容；2. 只能按 questionId 对齐正式题目；3. 无法辨认写[无法辨认]且 confidence 低于0.5；4. 自动判断正误和得分；5. 错题必须生成分步解析、错误原因、订正答案，以及2道同知识点同题型但数值或情境不同的练习题；6. 每个正式题目恰好返回一项。\n只返回 JSON：{"ocrText":"完整识别原文","items":[{"questionId":"题目id","knowledgeId":"知识点id","studentAnswer":"学生答案","isCorrect":false,"score":0,"reason":"错误原因","correction":"正确答案","explanation":"分步题目解析","confidence":0.0,"practiceQuestions":[{"prompt":"同类题","answer":"答案","explanation":"解析"}]}]}`;
   const parsed = await askModel(userId, prompt, images, reservation, signal);
   if (tiles.length) {
+    const returnedIds = new Set(
+      Array.isArray(parsed?.items)
+        ? parsed.items.map((item) => item?.questionId)
+        : [],
+    );
     if (
       !Array.isArray(parsed?.items) ||
       parsed.items.length !== qs.length ||
-      new Set(parsed.items.map((item) => item?.questionId)).size !==
-        qs.length ||
-      qs.some((q) => !parsed.items.some((item) => item?.questionId === q.id))
+      returnedIds.size !== qs.length ||
+      qs.some((q) => !returnedIds.has(q.id))
     )
       throw new Error("切片识别题号缺失或重复，请重新识别或由教师检查原件");
   }
@@ -1299,6 +1312,7 @@ const recognitionQueue = createRecognitionQueue(
       reservation();
     }
   },
+  { canStart: () => pressure.limit(1) > 0 },
 );
 app.post("/api/submissions/:id/recognition-jobs", auth, teacher, (req, res) => {
   const submission = db
@@ -1355,6 +1369,9 @@ app.get("/api/operations", auth, schoolAdmin, (req, res) => {
     uptimeSeconds: Math.floor(process.uptime()),
     requestsLast15Minutes: requestMetrics.snapshot(req.user.school_id),
     costBudget: costBudget.summary(req.user.school_id),
+    resources: pressure.snapshot(),
+    passwordWork: passwords.snapshot(),
+    statementCache: statements.snapshot(),
   });
 });
 app.post("/api/submissions/:id/recognize", auth, teacher, async (req, res) => {

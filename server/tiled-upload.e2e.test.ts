@@ -111,6 +111,7 @@ beforeAll(async () => {
       HOST: "127.0.0.1",
       DATA_DIR: dir,
       NODE_ENV: "test",
+      SYSTEM_PRESSURE_ENABLED: "0",
       APP_SECRET: "tiling-test-only-not-a-real-production-key",
       CLIENT_TILING_ENABLED: "1",
       DEEPSEEK_FILES_ENABLED: "1",

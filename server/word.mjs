@@ -1,19 +1,9 @@
 import mammoth from "mammoth";
 import WordExtractor from "word-extractor";
 
-const DOCX =
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-const DOC = "application/msword";
+import { DOCX } from "./document-types.mjs";
 
-export function isWordDocument(mimeType, fileName = "") {
-  const lower = fileName.toLowerCase();
-  return (
-    mimeType === DOCX ||
-    mimeType === DOC ||
-    lower.endsWith(".docx") ||
-    lower.endsWith(".doc")
-  );
-}
+export { isWordDocument } from "./document-types.mjs";
 
 export async function extractWordDocument(filePath, mimeType, fileName = "") {
   const isDocx = mimeType === DOCX || fileName.toLowerCase().endsWith(".docx");

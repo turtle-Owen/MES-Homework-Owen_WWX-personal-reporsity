@@ -111,8 +111,9 @@ export function createUploadAdmission(
   function acquire(user, ip) {
     pressure.assertUpload();
     ipLimit(ip);
+    const allowed = pressure.limit(globalConcurrent);
     if (
-      activeWriters.size >= globalConcurrent ||
+      activeWriters.size >= allowed ||
       [...activeWriters.values()].includes(user.id)
     )
       throw uploadError("正在上传其他文件，请稍后重试", 429);
@@ -126,7 +127,7 @@ export function createUploadAdmission(
           "SELECT COUNT(*) total,COALESCE(SUM(user_id=?),0) own FROM upload_writers",
         )
         .get(user.id);
-      if (count.total >= globalConcurrent || count.own >= 1)
+      if (count.total >= allowed || count.own >= 1)
         throw uploadError("正在上传其他文件，请稍后重试", 429);
       db.prepare("INSERT INTO upload_writers VALUES(?,?,?)").run(
         id,

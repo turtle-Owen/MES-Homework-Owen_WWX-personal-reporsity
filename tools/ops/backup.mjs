@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { createBackupGate } from "./backup-pressure.mjs";
 import { createBackup, verifyBackup, restoreBackup } from "./storage.mjs";
 
 const SNAPSHOT = /^snapshot-\d{8}T\d{9}Z-[a-f0-9-]{36}$/;
@@ -42,6 +43,7 @@ export function backupSettings(env = process.env) {
   const total = positive(env.BACKUP_MAX_TOTAL_MB, 16384) * 1024 ** 2;
   return {
     source: path.resolve(env.DATA_DIR),
+    pressureEnabled: env.SYSTEM_PRESSURE_ENABLED !== "0",
     root: path.resolve(env.BACKUP_DIR),
     recent: positive(env.BACKUP_KEEP_RECENT, 24),
     days: positive(env.BACKUP_KEEP_DAYS, 7),
@@ -151,7 +153,10 @@ function recoverInflight(root, ownerId) {
   // have completed verification until a later run produces its own good copy.
   fs.rmSync(file);
 }
-export async function runBackup(settings, { now = Date.now } = {}) {
+export async function runBackup(
+  settings,
+  { now = Date.now, gate = null } = {},
+) {
   const source = fs.realpathSync(settings.source);
   fs.mkdirSync(settings.root, { recursive: true, mode: 0o700 });
   const root = fs.realpathSync(settings.root);
@@ -162,6 +167,10 @@ export async function runBackup(settings, { now = Date.now } = {}) {
     ownerId,
     statusOwned = false;
   const statusFile = path.join(root, "status.json");
+  const guard =
+    gate ||
+    (settings.pressureEnabled ? createBackupGate(settings.source) : null);
+  const checkpoint = () => guard?.check();
   try {
     const identityFile = path.join(root, ".backup-root.json");
     if (!fs.existsSync(identityFile))
@@ -176,6 +185,8 @@ export async function runBackup(settings, { now = Date.now } = {}) {
     ownerId = identity.ownerId;
     if (fs.existsSync(statusFile)) state = read(statusFile);
     statusOwned = true;
+    await guard?.ready;
+    checkpoint();
     recoverInflight(root, ownerId);
     const time = now();
     const target =
@@ -204,10 +215,11 @@ export async function runBackup(settings, { now = Date.now } = {}) {
       minFreeBytes: settings.minFreeBytes,
       spaceCopies: needsDrill ? 2 : 1,
       createdAt: new Date(time).toISOString(),
+      checkpoint,
     });
-    const verified = verifyBackup(destination);
+    const verified = verifyBackup(destination, { checkpoint });
     if (needsDrill) {
-      restoreBackup(destination, path.join(root, drill));
+      restoreBackup(destination, path.join(root, drill), { checkpoint });
       fs.rmSync(path.join(root, drill), { recursive: true });
     }
     state = {
@@ -237,12 +249,13 @@ export async function runBackup(settings, { now = Date.now } = {}) {
     if (statusOwned)
       write(statusFile, {
         ...state,
-        state: "failed",
+        state: error.code === "BACKUP_DEFERRED" ? "deferred" : "failed",
         finishedAt: new Date(now()).toISOString(),
         error: error.message,
       });
     throw error;
   } finally {
+    guard?.stop();
     unlock();
   }
 }
@@ -251,7 +264,7 @@ export function backupStatus(settings, { now = Date.now } = {}) {
   if (!fs.existsSync(file)) return { state: "missing", healthy: false };
   const state = read(file);
   const healthy =
-    ["succeeded", "running"].includes(state.state) &&
+    ["succeeded", "running", "deferred"].includes(state.state) &&
     typeof state.lastSnapshot === "string" &&
     SNAPSHOT.test(state.lastSnapshot) &&
     fs.existsSync(
@@ -280,6 +293,6 @@ if (
     } else throw new Error("用法：node tools/ops/backup.mjs <run|status>");
   } catch (error) {
     console.error(error.message);
-    process.exitCode = 1;
+    process.exitCode = error.code === "BACKUP_DEFERRED" ? 75 : 1;
   }
 }

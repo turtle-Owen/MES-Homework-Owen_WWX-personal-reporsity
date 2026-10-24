@@ -31,6 +31,7 @@ export function createRecognitionQueue(
     timeoutMs = 120000,
     retryMs = 5000,
     now = Date.now,
+    canStart = () => true,
   } = {},
 ) {
   let stopped = false;
@@ -266,6 +267,7 @@ export function createRecognitionQueue(
   async function tick() {
     if (stopped) return;
     recover();
+    if (!canStart()) return 0;
     const running = [];
     for (let i = 0; i < concurrency; i++) {
       const job = claim();
@@ -273,17 +275,19 @@ export function createRecognitionQueue(
       running.push(run(job));
     }
     await Promise.all(running);
+    return running.length;
   }
   let scheduler;
   function start() {
     if (scheduler || stopped) return;
     const next = async () => {
+      let claimed = 0;
       try {
-        await tick();
+        claimed = await tick();
       } catch {
         console.error("Recognition scheduler failed; retrying on next tick");
       }
-      if (!stopped) scheduler = setTimeout(next, 500);
+      if (!stopped) scheduler = setTimeout(next, claimed ? 500 : 2000);
     };
     scheduler = setTimeout(next, 0);
   }

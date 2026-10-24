@@ -58,6 +58,7 @@ async function startServer() {
       PORT: String(port),
       APP_SECRET: process.env.APP_SECRET || "verify-only-secret-at-least-32-characters",
       NODE_ENV: "test",
+      SYSTEM_PRESSURE_ENABLED: "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
