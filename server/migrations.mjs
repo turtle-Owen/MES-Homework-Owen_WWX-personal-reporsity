@@ -1,4 +1,4 @@
-// v0.2.1-rc1 schema migrations.
+// v0.2.1 schema migrations (rc1+).
 //
 // SQLite cannot widen a CHECK constraint or drop NOT NULL in place, so the two
 // tables that changed shape are rebuilt with the documented 12-step pattern

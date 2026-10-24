@@ -1,295 +1,285 @@
-// 校园作业分析 · 一键部署器
-// 自动检测并安装依赖 → 准备源码 → 构建 → 启动服务 → 按选择开放局域网或公网访问。
-//
-// 用法示例：
-//   campus-deploy.exe                     交互式菜单
-//   campus-deploy.exe --web               打开浏览器可视化部署控制台
-//   campus-deploy.exe --mode lan          局域网部署
-//   campus-deploy.exe --mode tunnel       临时公网隧道
-//   campus-deploy.exe --mode domain --domain homework.example.com --api-token xxx
-#include <windows.h>
+// 校园作业分析 · 桌面部署器 —— 程序入口
+// 单文件桌面应用：Apple 风格 UI + 轻量毛玻璃；启动时选择本地版/服务器版。
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
 
-#include <iostream>
+#include <GLFW/glfw3.h>
+
+// MSVC 的 <GL/gl.h> 必须晚于 <windows.h>；Linux/macOS 直接包含系统 GL 头。
+#if defined(_WIN32)
+#include <windows.h>
+#include <GL/gl.h>
+#elif defined(__APPLE__)
+#include <OpenGL/gl3.h>
+#else
+#include <GL/gl.h>
+#endif
+
+#include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
-#include "deploy.h"
-#include "util.h"
-#include "webconsole.h"
-
-using namespace sc;
+#include "app.h"
+#include "core/core.h"
+#include "core/elevated.h"
+#include "platform/platform.h"
+#include "ui/screens.h"
+#include "ui/theme.h"
+#include "ui/widgets.h"
 
 namespace {
 
-const char *kVersion = "1.0.0";
-
-void printBanner() {
-  setColor(Color::Bold);
-  std::cout << "\n  校园作业分析 · 一键部署器  v" << kVersion << "\n";
-  resetColor();
-  setColor(Color::Dim);
-  std::cout << "  Smart Campus Homework Analyzer · One-click Deployer\n";
-  resetColor();
-  std::cout << "  ──────────────────────────────────────────────────────\n";
-}
-
-void printHelp() {
-  printBanner();
-  std::cout << R"(
-用法：campus-deploy.exe [选项]
-
-部署方式
-  --mode lan              局域网访问（同一 WiFi / 办公室网络，推荐课堂使用）
-  --mode tunnel           Cloudflare 临时公网隧道，自动获得 https 地址
-  --mode domain           绑定自己的域名（需要 Cloudflare 账号与域名）
-
-选项
-  --domain <域名>         自定义域名，例如 homework.example.com
-  --api-token <令牌>      Cloudflare API Token（写 DNS 记录，需 DNS:Edit、Zone:Read；创建隧道另需 Tunnel:Edit、账户读取）
-  --tunnel-token <令牌>   命名隧道的连接器令牌（已有隧道时使用）
-  --tunnel-id <ID>        已有隧道 ID（可选，与凭证文件配合）
-  --port <端口>           服务端口，默认 8787
-  --dir <目录>            指定源码目录；缺省时自动探测，找不到就从 GitHub 下载
-  --repo <地址>           源码仓库，默认 https://github.com/turtlelnc/MES-Homework.git
-  --web                   打开浏览器可视化部署控制台
-  --no-browser             启动 Web 控制台时不自动打开浏览器
-  --web-port <端口>       Web 控制台端口，默认 8899
-  --skip-install          跳过 npm install
-  --skip-build            跳过 npm run build
-  --yes                   不询问，直接执行
-  --verbose               输出完整构建日志
-  --help                  显示本帮助
-  --version               显示版本
-
-示例
-  campus-deploy.exe --web
-  campus-deploy.exe --mode lan --port 8080
-  campus-deploy.exe --mode domain --domain hw.example.com --api-token cf_xxx
-)";
-}
-
-std::string askText(const std::string &question, const std::string &defaultValue = "") {
-  std::cout << "  " << question;
-  if (!defaultValue.empty()) std::cout << "（默认 " << defaultValue << "）";
-  std::cout << "：";
-  std::string answer;
-  std::getline(std::cin, answer);
-  answer = trim(answer);
-  return answer.empty() ? defaultValue : answer;
-}
-
-void printDependencies(const std::vector<Dependency> &dependencies) {
-  std::cout << "\n  环境检测\n";
-  for (const Dependency &dependency : dependencies) {
-    const bool ok = dependency.available;
-    setColor(ok ? Color::Green : (dependency.required ? Color::Red : Color::Dim));
-    std::cout << (ok ? "  ✔ " : (dependency.required ? "  ✘ " : "  – "));
-    resetColor();
-    std::cout << dependency.title;
-    if (!dependency.version.empty()) std::cout << "  " << dependency.version;
-    else if (!dependency.note.empty()) std::cout << "  " << dependency.note;
-    std::cout << "\n";
+// GUI 子系统下从 CI/终端启动 CLI 模式时，接管父进程控制台以输出信息
+// （--version/--self-test/--elevated-action）。双击启动时不会出现控制台窗口。
+void attachParentConsole() {
+#if defined(_WIN32)
+  if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+    FILE* stream = nullptr;
+    freopen_s(&stream, "CONOUT$", "w", stdout);
+    freopen_s(&stream, "CONOUT$", "w", stderr);
+    freopen_s(&stream, "CONIN$", "r", stdin);
   }
+#endif
 }
 
-Mode askMode() {
-  std::cout << "\n  选择部署方式\n"
-               "    1) 局域网（内网）访问 —— 同一网络内的设备都能打开，适合课堂\n"
-               "    2) Cloudflare 临时公网隧道 —— 自动生成 https 地址，关掉即失效\n"
-               "    3) 绑定自己的域名 —— 需要域名已托管在 Cloudflare\n";
-  const std::string choice = askText("请输入序号", "1");
-  if (choice == "2") return Mode::QuickTunnel;
-  if (choice == "3") return Mode::CustomDomain;
-  return Mode::Lan;
+#if defined(_WIN32)
+void fatalMessageBox(const wchar_t* text) {
+  MessageBoxW(nullptr, text, L"校园作业分析 · 桌面部署器",
+              MB_OK | MB_ICONERROR);
+}
+#endif
+
+constexpr int kWindowWidth = 1120;
+constexpr int kWindowHeight = 720;
+constexpr float kTitleBarHeight = 52.0f;
+
+bool gDragging = false;
+double gDragStartX = 0.0, gDragStartY = 0.0;
+int gWindowStartX = 0, gWindowStartY = 0;
+
+void glfwErrorCallback(int code, const char* description) {
+  std::fprintf(stderr, "GLFW error %d: %s\n", code,
+               description ? description : "");
 }
 
-void printResult(const std::vector<std::string> &urls, const std::string &secret,
-                 Mode mode) {
-  std::cout << "\n";
-  setColor(Color::Green);
-  std::cout << "  ✔ 部署完成\n";
-  resetColor();
-  std::cout << "  ──────────────────────────────────────────────────────\n";
-  std::cout << "  访问地址\n";
-  for (const std::string &url : urls) {
-    setColor(Color::Cyan);
-    std::cout << "    " << url << "\n";
-    resetColor();
+void drawWindowControls(GLFWwindow* window, float scale, bool& dragging) {
+  ImGuiIO& io = ImGui::GetIO();
+  const float buttonSize = 26.0f * scale;
+  const float right = io.DisplaySize.x - 18.0f * scale;
+  const float top = 13.0f * scale;
+  ImDrawList* draw = ImGui::GetForegroundDrawList();
+
+  ImGui::SetCursorScreenPos(ImVec2(right - buttonSize, top));
+  ImGui::InvisibleButton("##window-close", ImVec2(buttonSize, buttonSize));
+  const bool hoverClose = ImGui::IsItemHovered();
+  const ImVec2 closeMin = ImGui::GetItemRectMin();
+  const ImVec2 closeMax = ImGui::GetItemRectMax();
+  draw->AddCircleFilled(
+      ImVec2((closeMin.x + closeMax.x) * 0.5f, (closeMin.y + closeMax.y) * 0.5f),
+      buttonSize * 0.5f,
+      hoverClose ? IM_COL32(255, 95, 87, 255) : IM_COL32(255, 111, 97, 235));
+  if (hoverClose) {
+    draw->AddLine(
+        ImVec2(closeMin.x + 8.0f * scale, closeMin.y + 8.0f * scale),
+        ImVec2(closeMax.x - 8.0f * scale, closeMax.y - 8.0f * scale),
+        IM_COL32(120, 25, 20, 255), 1.6f * scale);
+    draw->AddLine(
+        ImVec2(closeMax.x - 8.0f * scale, closeMin.y + 8.0f * scale),
+        ImVec2(closeMin.x + 8.0f * scale, closeMax.y - 8.0f * scale),
+        IM_COL32(120, 25, 20, 255), 1.6f * scale);
   }
-  if (mode == Mode::Lan) {
-    std::cout << "\n  提示：若局域网内其它设备打不开，请允许 Node.js 通过 Windows 防火墙，\n"
-                 "        或执行（需管理员权限）：\n";
-    setColor(Color::Dim);
-    std::cout << "        netsh advfirewall firewall add rule name=\"Campus Homework\" "
-                 "dir=in action=allow protocol=TCP localport=8787\n";
-    resetColor();
-  }
-  if (mode == Mode::QuickTunnel) {
-    std::cout << "\n  提示：临时地址在程序关闭后失效；需要长期可用请改用自定义域名模式。\n";
-  }
-  std::cout << "\n  密钥 APP_SECRET 已写入源码目录的 .env，请勿外传，也勿提交到 git。\n";
-  (void)secret;
-  std::cout << "  按 Ctrl+C 可停止服务并退出。\n\n";
-}
+  if (ImGui::IsItemClicked()) glfwSetWindowShouldClose(window, 1);
 
-/// 命令行直通模式：不进入菜单，执行完保持运行。
-int runDirect(Deployer &deployer, const Args &args) {
-  const Mode mode = deployer.options().mode;
-  std::cout << "\n  部署方式：" << modeName(mode) << "\n";
+  ImGui::SetCursorScreenPos(ImVec2(right - buttonSize * 2.4f, top));
+  ImGui::InvisibleButton("##window-min", ImVec2(buttonSize, buttonSize));
+  const bool hoverMin = ImGui::IsItemHovered();
+  const ImVec2 minMin = ImGui::GetItemRectMin();
+  const ImVec2 minMax = ImGui::GetItemRectMax();
+  draw->AddCircleFilled(
+      ImVec2((minMin.x + minMax.x) * 0.5f, (minMin.y + minMax.y) * 0.5f),
+      buttonSize * 0.5f,
+      hoverMin ? IM_COL32(255, 189, 46, 255) : IM_COL32(254, 188, 46, 235));
+  if (hoverMin)
+    draw->AddLine(
+        ImVec2(minMin.x + 8.0f * scale, (minMin.y + minMax.y) * 0.5f),
+        ImVec2(minMax.x - 8.0f * scale, (minMin.y + minMax.y) * 0.5f),
+        IM_COL32(130, 85, 10, 255), 1.6f * scale);
+  if (ImGui::IsItemClicked()) glfwIconifyWindow(window);
 
-  std::vector<Dependency> dependencies = deployer.inspect();
-  std::vector<Dependency> missing;
-  for (const Dependency &dependency : dependencies)
-    if (dependency.required && !dependency.available) missing.push_back(dependency);
-
-  if (!missing.empty()) {
-    printDependencies(dependencies);
-    logStep("检测到缺失依赖，开始自动安装…");
-    if (!deployer.installDependencies(dependencies)) {
-      logError("依赖安装未全部完成，请处理后重试");
-      return 1;
-    }
-  }
-
-  std::vector<std::string> urls;
-  if (!deployer.deploy(urls)) {
-    logError("部署失败");
-    return 1;
-  }
-  printResult(urls, deployer.appSecret(), mode);
-
-  // 保持进程存活，随 Ctrl+C 一起收尾
-  while (deployer.serviceRunning()) Sleep(500);
-  logWarn("服务进程已退出");
-  return 0;
-}
-
-/// 交互式菜单模式；返回 kSwitchToWeb 表示用户要求切到 Web 控制台。
-const int kSwitchToWeb = -2;
-
-int runInteractive(Deployer &deployer, int webPort) {
-  for (;;) {
-    printBanner();
-    Options &options = deployer.options();
-    std::vector<Dependency> dependencies = deployer.inspect();
-    printDependencies(dependencies);
-
-    bool missing = false;
-    for (const Dependency &dependency : dependencies)
-      if (dependency.required && !dependency.available) missing = true;
-
-    std::cout << "\n  当前设置：端口 " << options.port << "，部署方式 "
-              << (options.mode == Mode::Lan
-                      ? "局域网（内网）"
-                      : (options.mode == Mode::QuickTunnel ? "Cloudflare 临时公网隧道"
-                                                          : "自定义域名"))
-              << "\n";
-    std::cout << "\n  请选择操作\n"
-                 "    1) 一键部署（自动安装缺失依赖并启动）\n"
-                 "    2) 只安装缺失依赖\n"
-                 "    3) 修改设置（端口 / 部署方式 / 源码目录）\n"
-                 "    4) 打开浏览器可视化控制台\n"
-                 "    0) 退出\n";
-    const std::string choice = askText("请输入序号", "1");
-
-    if (choice == "0") return 0;
-    if (choice == "2") {
-      if (!missing) {
-        logOk("依赖已齐全，无需安装");
-        continue;
-      }
-      deployer.installDependencies(dependencies);
-      continue;
-    }
-    if (choice == "3") {
-      const std::string port = askText("服务端口", std::to_string(options.port));
-      try {
-        int value = std::stoi(port);
-        if (value > 0 && value < 65536) options.port = value;
-      } catch (...) {
-      }
-      options.mode = askMode();
-      if (options.mode == Mode::CustomDomain) {
-        options.domain = askText("自定义域名（例如 hw.example.com）");
-        options.apiToken = askText("Cloudflare API Token（可留空，稍后手动配置 DNS）");
-        options.tunnelToken = askText("隧道连接器令牌（已有隧道时填写，可留空）");
-      }
-      const std::string dir = askText("源码目录（留空自动探测/下载）", options.projectDir);
-      options.projectDir = dir;
-      continue;
-    }
-    if (choice == "4") return kSwitchToWeb;
-
-    // 一键部署
-    if (missing) {
-      logStep("检测到缺失依赖，先自动安装…");
-      if (!deployer.installDependencies(dependencies)) {
-        logError("依赖安装未全部完成，请查看上方提示后重试");
-        continue;
-      }
-    }
-    std::vector<std::string> urls;
-    if (!deployer.deploy(urls)) {
-      logError("部署失败，可查看上方日志后重试");
-      std::cout << "\n";
-      system("pause");
-      continue;
-    }
-    printResult(urls, deployer.appSecret(), options.mode);
-    // 部署成功后保持运行，让服务继续对外提供
-    while (deployer.serviceRunning()) Sleep(1000);
-    logWarn("服务已停止，返回菜单");
+  if (!dragging && io.MouseDown[0] && ImGui::IsMouseClicked(0) &&
+      io.MousePos.y < kTitleBarHeight * scale && io.MousePos.y >= 0 &&
+      io.MousePos.x > 12.0f * scale &&
+      io.MousePos.x < right - buttonSize * 3.2f) {
+    dragging = true;
+    glfwGetWindowPos(window, &gWindowStartX, &gWindowStartY);
+    gDragStartX = io.MousePos.x;
+    gDragStartY = io.MousePos.y;
   }
 }
 
 }  // namespace
 
-int main(int argc, char **argv) {
-  initConsole();
-  Args args = parseArgs(argc, argv);
-
-  if (args.help) {
-    printHelp();
-    return 0;
-  }
-  if (args.version) {
-    setColor(Color::Bold);
-    std::cout << "campus-deploy " << kVersion << "\n";
-    resetColor();
-    return 0;
-  }
-
-  Deployer deployer;
-  Options &options = deployer.options();
-  options.port = args.port;
-  options.projectDir = args.dir;
-  if (!args.repo.empty()) options.repo = args.repo;
-  options.domain = args.domain;
-  options.apiToken = args.apiToken;
-  options.tunnelToken = args.tunnelToken;
-  options.tunnelId = args.tunnelId;
-  options.skipInstall = args.skipInstall;
-  options.skipBuild = args.skipBuild;
-  options.verbose = args.verbose;
-  if (args.mode == "lan") options.mode = Mode::Lan;
-  else if (args.mode == "tunnel") options.mode = Mode::QuickTunnel;
-  else if (args.mode == "domain") options.mode = Mode::CustomDomain;
-
-  // Web 控制台模式
-  if (args.web) {
-    printBanner();
-    return runWebConsole(deployer, args.webPort, !args.noBrowser);
+int main(int argc, char** argv) {
+  bool selfTest = false;
+  bool demo = false;
+  std::string forcedScreen;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i] ? argv[i] : "";
+    if (arg == "--self-test" || arg == "--selftest")
+      selfTest = true;
+    else if (arg == "--demo")
+      demo = true;
+    else if (arg.rfind("--screen=", 0) == 0)
+      forcedScreen = arg.substr(9);
+    else if (arg == "--version" || arg == "-v") {
+      attachParentConsole();
+      std::printf("校园作业分析桌面部署器 %s (build %s)\n",
+                  mes::core::kVersion, mes::core::kBuild);
+      return 0;
+    } else if (arg == "--help" || arg == "-h") {
+      attachParentConsole();
+      std::printf(
+          "校园作业分析 · 桌面部署器 %s (build %s)\n"
+          "  --self-test    运行核心自检（CI/诊断用）\n"
+          "  --demo         演示模式：不联网、不写入真实目录\n"
+          "  --screen=NAME  直接打开指定页面（welcome/configure/installing/result）\n"
+          "  --version      输出版本\n",
+          mes::core::kVersion, mes::core::kBuild);
+      return 0;
+    }
   }
 
-  // 有 --mode 时直接执行，否则进入交互菜单
-  if (!args.mode.empty()) return runDirect(deployer, args);
-
-  printBanner();
-  int result = runInteractive(deployer, args.webPort);
-  if (result == kSwitchToWeb) {
-    // 用户选择进入可视化控制台
-    return runWebConsole(deployer, args.webPort, !args.noBrowser);
+  // 以管理员/root 权限重新执行本程序时，只执行被请求的系统级动作（服务/防火墙），
+  // 不创建窗口；由 engine.cpp 解析 --elevated-action=... 等参数。
+  bool elevatedRequest = false;
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i] ? argv[i] : "";
+    if (arg.rfind("--elevated-action=", 0) == 0) {
+      elevatedRequest = true;
+      break;
+    }
   }
-  deployer.stop();
-  return result;
+  if (elevatedRequest) {
+    attachParentConsole();
+    std::vector<std::string> args;
+    for (int i = 1; i < argc; ++i)
+      args.emplace_back(argv[i] ? argv[i] : "");
+    return mes::core::runElevatedAction(args);
+  }
+
+  if (selfTest) {
+    attachParentConsole();
+    return mes::core::runSelfTest(true) ? 0 : 1;
+  }
+
+  glfwSetErrorCallback(glfwErrorCallback);
+  if (!glfwInit()) {
+#if defined(_WIN32)
+    fatalMessageBox(L"无法初始化图形环境（GLFW）。请确认显卡驱动与桌面会话可用。");
+#else
+    std::fprintf(stderr, "无法初始化图形环境（GLFW）。\n");
+#endif
+    return 2;
+  }
+  mes::platform::configureWindowHints();
+  GLFWwindow* window = glfwCreateWindow(kWindowWidth, kWindowHeight,
+                                        "MES Homework 部署器", nullptr, nullptr);
+  if (!window) {
+    glfwTerminate();
+#if defined(_WIN32)
+    fatalMessageBox(L"无法创建窗口。请确认桌面会话、显卡驱动与 OpenGL 可用。");
+#else
+    std::fprintf(stderr, "无法创建窗口，请确认桌面与 OpenGL 驱动可用。\n");
+#endif
+    return 3;
+  }
+  glfwMakeContextCurrent(window);
+  glfwSwapInterval(1);
+  mes::platform::styleWindow(window);
+  mes::platform::setWindowIconIfAvailable(window);
+
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGuiIO& io = ImGui::GetIO();
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+  io.IniFilename = nullptr;
+
+  float xscale = 1.0f, yscale = 1.0f;
+  glfwGetWindowContentScale(window, &xscale, &yscale);
+  const float scale = (xscale > 0.5f && xscale < 3.0f) ? xscale : 1.0f;
+
+  mes::ui::loadFonts(scale);
+  mes::ui::applyStyle();
+
+  ImGui_ImplGlfw_InitForOpenGL(window, true);
+  ImGui_ImplOpenGL3_Init("#version 330");
+
+  mes::AppState state;
+  mes::appInit(state, demo);
+  if (forcedScreen == "configure")
+    state.screen = mes::Screen::Configure;
+  else if (forcedScreen == "installing")
+    state.screen = mes::Screen::Installing;
+  else if (forcedScreen == "result")
+    state.screen = mes::Screen::Result;
+  else if (forcedScreen == "about")
+    state.screen = mes::Screen::About;
+
+  while (!glfwWindowShouldClose(window)) {
+    glfwPollEvents();
+    if (glfwGetWindowAttrib(window, GLFW_ICONIFIED)) {
+      glfwWaitEventsTimeout(0.2);
+      continue;
+    }
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    int fbWidth = 0, fbHeight = 0;
+    glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
+    if (fbWidth > 0 && fbHeight > 0) {
+      glViewport(0, 0, fbWidth, fbHeight);
+      glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+      glClear(GL_COLOR_BUFFER_BIT);
+    }
+
+    mes::ui::drawBackground();
+    mes::ui::drawTopBar(state);
+    switch (state.screen) {
+      case mes::Screen::Welcome: mes::ui::drawWelcome(state); break;
+      case mes::Screen::Configure: mes::ui::drawConfigure(state); break;
+      case mes::Screen::Installing: mes::ui::drawInstalling(state); break;
+      case mes::Screen::Result: mes::ui::drawResult(state); break;
+      case mes::Screen::About: mes::ui::drawAbout(state, true); break;
+    }
+    mes::ui::drawFooter(state);
+    mes::ui::drawToast(state);
+    drawWindowControls(window, scale, gDragging);
+
+    if (gDragging) {
+      double x = 0.0, y = 0.0;
+      glfwGetCursorPos(window, &x, &y);
+      glfwSetWindowPos(window,
+                       gWindowStartX + static_cast<int>(x - gDragStartX),
+                       gWindowStartY + static_cast<int>(y - gDragStartY));
+      if (!ImGui::IsMouseDown(0)) gDragging = false;
+    }
+
+    ImGui::Render();
+    if (fbWidth > 0 && fbHeight > 0) {
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+      glfwSwapBuffers(window);
+    }
+    mes::appFrame(state);
+  }
+
+  mes::appShutdown(state);
+  ImGui_ImplOpenGL3_Shutdown();
+  ImGui_ImplGlfw_Shutdown();
+  ImGui::DestroyContext();
+  glfwDestroyWindow(window);
+  glfwTerminate();
+  return 0;
 }
