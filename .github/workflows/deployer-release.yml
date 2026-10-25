@@ -24,8 +24,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  DEPLOYER_VERSION: v0.2.1-rc3
-  DEPLOYER_BUILD: "26102403"
+  DEPLOYER_VERSION: v0.2.1-rc4
+  DEPLOYER_BUILD: "26102501"
 
 jobs:
   deployer-windows:
@@ -271,7 +271,7 @@ jobs:
               --draft --prerelease \
               --target "${GITHUB_SHA}" \
               --title "桌面版无依赖一键部署器 ${DEPLOYER_VERSION} (build ${DEPLOYER_BUILD})" \
-              --notes-file docs/releases/v0.2.1-rc3.md
+              --notes-file docs/releases/v0.2.1-rc4.md
           fi
           gh release upload "${DEPLOYER_VERSION}" release/* \
             --repo "${GITHUB_REPOSITORY}" --clobber

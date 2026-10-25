@@ -1,7 +1,7 @@
 # Smart Campus Homework Analyzer · 校园作业分析
 
-[![Version](https://img.shields.io/badge/version-v0.2.1--rc3-2ea44f?style=flat)](https://github.com/turtlelnc/MES-Homework/releases)
-[![Build](https://img.shields.io/badge/build-26102403-0A84FF?style=flat)](https://github.com/turtlelnc/MES-Homework/releases)
+[![Version](https://img.shields.io/badge/version-v0.2.1--rc4-2ea44f?style=flat)](https://github.com/turtlelnc/MES-Homework/releases)
+[![Build](https://img.shields.io/badge/build-26102501-0A84FF?style=flat)](https://github.com/turtlelnc/MES-Homework/releases)
 [![Tests](https://img.shields.io/badge/tests-CI%20passing-brightgreen?style=flat&logo=githubactions&logoColor=white)](https://github.com/turtlelnc/MES-Homework/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue?style=flat)](LICENSE)
 [![Security](https://img.shields.io/badge/security-P0%2FP1%20fixed-success?style=flat)](SECURITY_REVIEW.md)
@@ -11,7 +11,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A524-339933?style=flat&logo=nodedotjs&logoColor=white)](package.json)
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
 
-**v0.2.1-rc3** (build26102403) | MIT License
+**v0.2.1-rc4** (build26102501) | MIT License
 
 [中文](README.md) | English
 
@@ -25,7 +25,7 @@ This is a full-stack version that can run on school or personal servers. Account
 
 1. **Three teacher-selectable review modes**: review every question, review only uncertain items (high-confidence AI verdicts pass automatically), or no review (AI result is published immediately; incomplete model output still falls back to human review).
 2. **Explain the grade**: every graded item shows the result, the reference answer, and the AI's reasoning (why it was marked right/wrong). Visible in teacher review and the parent submission detail.
-3. **OAuth model links alongside API Keys**: ChatGPT (OpenAI), Claude (Anthropic), Gemini (Google) — with an explicit "not available in mainland China" confirmation before redirecting — plus WorkBuddy, Qwen, 千问 (China), and DeepSeek (Platform). OAuth 2.0 authorization code + PKCE, encrypted token storage, refresh and disconnect. Client IDs/endpoints are configured by the deployment admin via environment variables.
+3. **OAuth model links alongside API Keys**: since v0.2.1-rc4 the OAuth login options are ChatGPT (Codex OAuth, browser callback + PKCE or device code), Gemini (Google OAuth + PKCE, configured with a Google Cloud OAuth client) and WorkBuddy (device-code/browser polling, CN or global region). Users simply approve in the browser — no API key to copy. Claude, Qwen, 千问 and DeepSeek (Platform) OAuth entries were removed; those vendors remain available through API keys. Tokens are AES-256-GCM encrypted, refreshed automatically and can be disconnected. See [docs/oauth-flows.md](docs/oauth-flows.md).
 4. **Account-name registration with role selection**: school / teacher / student / parent, login by account name (legacy email logins still work). `ALLOW_PUBLIC_REGISTRATION=0` restores admin-only account creation.
 5. **Parent portal**: dashboard of the linked child's reviewed homework, scores, weak knowledge points, error causes, trends and per-question grading detail, plus one-click AI learning analysis.
 6. **School-managed model modes**: school-wide credentials, teacher-separate + class-fund (students/parents use the class head teacher's credential), or teacher-separate + parent-separate (students use their linked parent's credential).
@@ -36,7 +36,15 @@ This is a full-stack version that can run on school or personal servers. Account
 
 ### OAuth model configuration (deployment admin)
 
-OAuth uses Authorization Code + PKCE. Register the callback `<your domain>/api/oauth/<provider>/callback` with each vendor and provide `OAUTH_<ID>_CLIENT_ID` / `OAUTH_<ID>_CLIENT_SECRET` (and the authorize/token/API endpoint variables for WorkBuddy, Qwen, 千问 and DeepSeek). See `.env.example` for every variable name. Unconfigured providers show as "not configured" with the missing variable names and do not affect the API Key path. ChatGPT / Claude / Gemini are not available in mainland China; the UI asks for confirmation before redirecting.
+OAuth supports Authorization Code + PKCE and device-code flows; the UI shows "Browser login" / "Device code login" according to each provider's capabilities:
+
+- **ChatGPT**: built-in public Codex PKCE client, no Client ID needed; browser login listens on `http://localhost:1455/auth/callback`, device login shows a one-time code for `https://auth.openai.com/codex/device`.
+- **Gemini**: create a Google Cloud OAuth client (Desktop app), enable the Generative Language API and set `OAUTH_GEMINI_CLIENT_ID` / `OAUTH_GEMINI_CLIENT_SECRET` (scopes are listed in `.env.example`); otherwise the card shows "not configured".
+- **WorkBuddy**: built-in official authorization flow; `OAUTH_WORKBUDDY_REGION=cn|global` selects the region.
+
+ChatGPT and Gemini are not available in mainland China; the UI warns before redirecting. The API Key path is unaffected. Full interface and security notes: [docs/oauth-flows.md](docs/oauth-flows.md).
+
+![OAuth 登录界面](docs/screenshots-v0.2.1/oauth-settings.png)
 
 ## What's New in v0.2.0-rc1: AI Teaching Analysis
 
@@ -66,7 +74,7 @@ A new module for classroom review sessions that directly consumes teacher-review
 
 ![Desktop deployer](docs/screenshots-v0.2.1/deployer-welcome.png)
 
-Starting with v0.2.1-rc3 the project ships a **C++ desktop deployer** (GLFW + Dear ImGui + miniz,
+Starting with v0.2.1-rc4 the project ships a **C++ desktop deployer** (GLFW + Dear ImGui + miniz,
 single file, no external runtime dependencies, Apple-style UI with light frosted glass). Pick
 **Local** (run on this computer and open the browser) or **Server** (LAN/school server, optional
 autostart and firewall rule); the wizard downloads the runtime, verifies SHA-256, extracts, writes
@@ -78,7 +86,7 @@ be preinstalled: the app runtime bundle and Node binary are downloaded from the 
 (offline zip is also supported).
 
 Download the single-file deployer for your platform from
-[GitHub Releases](https://github.com/turtlelnc/MES-Homework/releases) tag `v0.2.1-rc3`
+[GitHub Releases](https://github.com/turtlelnc/MES-Homework/releases) tag `v0.2.1-rc4`
 (e.g. `mes-deployer-windows-x64.exe`) and run it. To build from source:
 
 ```powershell
@@ -102,11 +110,11 @@ npm start
 
 For development, run `npm run dev:server` and `npm run dev` separately, then visit `http://127.0.0.1:5173`. Production server listens on `127.0.0.1:8787` by default; use `HOST=0.0.0.0` to allow LAN access. Data is stored in `data/smart-campus.sqlite`, with original files in `data/uploads/`.
 
-## Security update (2026-10-24, v0.2.1-rc3)
+## Security update (2026-10-25, v0.2.1-rc4)
 
 Registration is now account-name + password + role selection; teachers/students/parents may self-register with a school code (requirement 4). Set `ALLOW_PUBLIC_REGISTRATION=0` to restore administrator-only account creation. A school code is not an identity credential: students cannot change their own stage/class, teachers only see their own assignments and school knowledge base, parents only see linked children, and every query stays scoped by school and account. Submission files and answers require the submitting student, owning teacher, linked parent, or school administrator; student assignment responses and the guided mistake notebook never expose reference answers directly; re-recognition requires fresh teacher approval (except when the selected review mode auto-completes).
 
-OAuth model links use Authorization Code + PKCE with one-time state validation. Tokens use the same AES-256-GCM encryption as API keys, are refreshed on expiry, and can be disconnected. Redirects are restricted to `APP_ORIGIN`/`OAUTH_REDIRECT_BASE` with no open redirects. ChatGPT, Claude and Gemini are not available in mainland China; the UI warns explicitly before redirecting.
+OAuth model links use Authorization Code + PKCE (ChatGPT also supports device code / Codex OAuth; WorkBuddy uses the official browser-polling authorization), with one-time state validation. Tokens use the same AES-256-GCM encryption as API keys, are refreshed on expiry, and can be disconnected. The ChatGPT callback listens only on `127.0.0.1:1455` and authorization URLs are restricted to official domains. Redirects are restricted to `APP_ORIGIN`/`OAUTH_REDIRECT_BASE` with no open redirects. ChatGPT and Gemini are not available in mainland China; the UI warns explicitly before redirecting.
 
 Model endpoints are restricted to the selected vendor's HTTPS origin. Deployment administrators may approve exact custom origins in comma-separated `PROVIDER_ALLOWED_ORIGINS`; existing stored endpoints are also checked on every call. Do not approve user-controlled domains or private-network addresses. Worker/reverse-proxy deployments must set `APP_ORIGIN=https://your-frontend-domain` on the API server, without a path or trailing slash. Client-supplied forwarding headers are not trusted. Production requires a valid `APP_SECRET` and HTTPS (Secure session cookies).
 
