@@ -284,6 +284,15 @@ export function migrateDatabase(db, { schemaSql }) {
   // Creates v0.2.1 tables and the partial unique indexes for fresh databases;
   // for upgraded databases it is a no-op for the rebuilt tables.
   db.exec(schemaSql);
+  // v0.2.1-rc4: provider identity metadata on existing OAuth connections. The
+  // migration only adds a column (defaults to '{}') so old rows are preserved.
+  if (tableNames(db).has("oauth_connections"))
+    ensureColumn(
+      db,
+      "oauth_connections",
+      "meta_json",
+      "TEXT NOT NULL DEFAULT '{}'",
+    );
   if (tableNames(db).has("assignments")) {
     const assignmentColumns = tableColumns(db, "assignments");
     ensureColumn(

@@ -243,3 +243,79 @@ describe("v0.2.1 schema migrations", () => {
     db.close();
   });
 });
+
+// v0.2.1-rc4 给 oauth_connections 增加 meta_json；旧库必须原地 ALTER 且保留行。
+const RC3_OAUTH_CONNECTIONS = `
+CREATE TABLE oauth_connections(
+  id TEXT PRIMARY KEY,user_id TEXT NOT NULL,provider TEXT NOT NULL,
+  account_label TEXT NOT NULL DEFAULT '',encrypted_access TEXT NOT NULL,
+  encrypted_refresh TEXT,iv TEXT NOT NULL,token_type TEXT NOT NULL DEFAULT 'Bearer',
+  scope TEXT NOT NULL DEFAULT '',expires_at INTEGER,
+  status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,UNIQUE(user_id,provider)
+);`;
+
+function rc3OauthDatabase() {
+  const db = new DatabaseSync(":memory:");
+  db.exec(legacySchema);
+  db.exec(RC3_OAUTH_CONNECTIONS);
+  const time = new Date().toISOString();
+  db.prepare(
+    "INSERT INTO oauth_connections(id,user_id,provider,account_label,encrypted_access,encrypted_refresh,iv,token_type,scope,expires_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  ).run(
+    "conn-1",
+    "u-teacher",
+    "deepseek",
+    "旧账号",
+    "cipher-access",
+    "cipher-body.cipher-iv",
+    "iv-value",
+    "Bearer",
+    "openid",
+    123,
+    "active",
+    time,
+    time,
+  );
+  return db;
+}
+
+describe("v0.2.1-rc4 oauth meta_json migration", () => {
+  it("adds meta_json to an existing oauth_connections table without losing rows", async () => {
+    const { migrateDatabase, tableColumns } = await import("./migrations.mjs");
+    const db = rc3OauthDatabase();
+    migrateDatabase(db, { schemaSql });
+
+    const columns = tableColumns(db, "oauth_connections");
+    expect(columns.has("meta_json")).toBe(true);
+    expect(columns.get("meta_json")?.notnull).toBe(1);
+    expect(columns.get("meta_json")?.dflt_value).toBe("'{}'");
+    const row = db
+      .prepare("SELECT * FROM oauth_connections WHERE id='conn-1'")
+      .get();
+    expect(row.provider).toBe("deepseek");
+    expect(row.encrypted_access).toBe("cipher-access");
+    expect(row.encrypted_refresh).toBe("cipher-body.cipher-iv");
+    expect(row.meta_json).toBe("{}");
+    db.close();
+  });
+
+  it("is idempotent when the connection table already has meta_json", async () => {
+    const { migrateDatabase } = await import("./migrations.mjs");
+    const db = rc3OauthDatabase();
+    migrateDatabase(db, { schemaSql });
+    const before = JSON.stringify(
+      db
+        .prepare("SELECT name,sql FROM sqlite_master ORDER BY name")
+        .all(),
+    );
+    migrateDatabase(db, { schemaSql });
+    const after = JSON.stringify(
+      db
+        .prepare("SELECT name,sql FROM sqlite_master ORDER BY name")
+        .all(),
+    );
+    expect(after).toBe(before);
+    db.close();
+  });
+});

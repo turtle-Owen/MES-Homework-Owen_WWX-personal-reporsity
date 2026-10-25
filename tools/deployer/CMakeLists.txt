@@ -25,8 +25,8 @@ option(MES_DEPLOYER_TESTING "Build deployer unit tests" ON)
 set(MES_DEPLOYER_DEPS_DIR "" CACHE PATH
   "Optional pre-downloaded dependency source root (glfw/, imgui/, miniz/). Empty = fetch from GitHub.")
 
-set(MES_VERSION_STRING "v0.2.1-rc3" CACHE STRING "Release version")
-set(MES_BUILD_STRING "26102403" CACHE STRING "Release build number")
+set(MES_VERSION_STRING "v0.2.1-rc4" CACHE STRING "Release version")
+set(MES_BUILD_STRING "26102501" CACHE STRING "Release build number")
 
 # ---------------------------------------------------------------- dependencies
 include(FetchContent)

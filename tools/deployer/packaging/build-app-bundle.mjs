@@ -21,8 +21,8 @@ const platform = option("platform", process.platform === "win32" ? "windows" : p
 const arch = option("arch", process.arch === "x64" ? "x64" : process.arch === "arm64" ? "arm64" : "x86");
 const root = path.resolve(option("root", rootDefault));
 const out = path.resolve(option("out", path.join(root, "release", `mes-homework-app-${platform}-${arch}.zip`)));
-const version = option("version", "v0.2.1-rc3");
-const build = option("build", "26102403");
+const version = option("version", "v0.2.1-rc4");
+const build = option("build", "26102501");
 
 function fail(message) {
   console.error(`打包失败：${message}`);

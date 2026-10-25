@@ -40,3 +40,6 @@ test-results/
 .tmp-release/
 tools/deployer/build-local/
 tools/deployer/build-*/
+
+# Local reference material for OAuth protocol research (not committed)
+.tmp-ref/

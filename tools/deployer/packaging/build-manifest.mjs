@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // 汇总应用运行时包信息，生成部署器使用的 release manifest 与校验文件。
 // 用法：
-//   node tools/deployer/packaging/build-manifest.mjs --dir release --version v0.2.1-rc3 --build 26102403
+//   node tools/deployer/packaging/build-manifest.mjs --dir release --version v0.2.1-rc4 --build 26102501
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -12,8 +12,8 @@ const option = (name, fallback = "") => {
   return index >= 0 && args[index + 1] ? args[index + 1] : fallback;
 };
 const dir = path.resolve(option("dir", "release"));
-const version = option("version", "v0.2.1-rc3");
-const build = option("build", "26102403");
+const version = option("version", "v0.2.1-rc4");
+const build = option("build", "26102501");
 
 if (!fs.existsSync(dir)) {
   console.error(`目录不存在：${dir}`);

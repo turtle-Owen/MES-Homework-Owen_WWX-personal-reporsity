@@ -8,7 +8,7 @@ import path from "node:path";
 import net from "node:net";
 import { pathToFileURL } from "node:url";
 
-// v0.2.1-rc3 端到端验收：真实启动服务，模型调用由 preload 的假 fetch 按顺序返回
+// v0.2.1-rc4 端到端验收：真实启动服务，模型调用由 preload 的假 fetch 按顺序返回
 // 预置 JSON。覆盖四身份注册、模型模式与凭证归属、三种复核方式、无原题直批、
 // 引导式错题本、家长端看板/学情分析与 OAuth 目录。
 
@@ -183,12 +183,12 @@ afterAll(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-describe("v0.2.1-rc3 (mock model only)", () => {
+describe("v0.2.1-rc4 (mock model only)", () => {
   it("reports the new version and build number", async () => {
     const health = await (await request("/api/health")).json();
-    expect(health.version).toBe("v0.2.1-rc3");
-    expect(health.build).toBe("26102403");
-    expect(health.versionLabel).toBe("v0.2.1-rc3 (build26102403)");
+    expect(health.version).toBe("v0.2.1-rc4");
+    expect(health.build).toBe("26102501");
+    expect(health.versionLabel).toBe("v0.2.1-rc4 (build26102501)");
   });
 
   it("registers school / teacher / student / parent with account names", async () => {
@@ -632,34 +632,65 @@ describe("v0.2.1-rc3 (mock model only)", () => {
     ).toBe(429);
   });
 
-  it("exposes OAuth providers, mainland warnings and the configured authorize URL", async () => {
+  it("exposes the rc4 OAuth provider matrix and browser/device flows", async () => {
     const catalog = await (
       await request("/api/oauth/providers", teacher)
     ).json();
-    expect(catalog.providers.map((row: any) => row.id).sort()).toEqual(
-      ["chatgpt", "claude", "deepseek", "gemini", "qianwen", "qwen", "workbuddy"],
+    expect(catalog.providers.map((row: any) => row.id).sort()).toEqual([
+      "chatgpt",
+      "gemini",
+      "workbuddy",
+    ]);
+    const byId = new Map(catalog.providers.map((row: any) => [row.id, row]));
+    expect(byId.get("chatgpt")).toMatchObject({
+      configured: true,
+      mainlandUnavailable: true,
+      flows: ["browser", "device"],
+    });
+    expect(byId.get("workbuddy")).toMatchObject({
+      configured: true,
+      flows: ["device"],
+    });
+    // Gemini 需要部署方配置 Google Cloud OAuth 客户端；e2e 环境未配置。
+    expect(byId.get("gemini")).toMatchObject({
+      configured: false,
+      flows: ["browser"],
+    });
+    expect(byId.get("gemini").envHint).toContain("OAUTH_GEMINI_CLIENT_ID");
+
+    const started = await request(
+      "/api/oauth/chatgpt/browser/start",
+      teacher,
+      "POST",
+      {},
     );
-    const chatgpt = catalog.providers.find((row: any) => row.id === "chatgpt");
-    expect(chatgpt.mainlandUnavailable).toBe(true);
-    expect(chatgpt.configured).toBe(true);
-    const started = await request("/api/oauth/chatgpt/start", teacher, "POST");
-    expect(started.status).toBe(200);
-    const { authorizeUrl } = await started.json();
-    const url = new URL(authorizeUrl);
-    expect(url.origin).toBe("https://auth.openai.com");
-    expect(url.searchParams.get("code_challenge_method")).toBe("S256");
-    expect(url.searchParams.get("state")).toBeTruthy();
-    const unconfigured = await (
-      await request("/api/oauth/providers", teacher)
-    ).json();
+    // 本机 1455 端口可能被其他 ChatGPT/Codex 客户端占用，此时允许 409。
+    expect([200, 409]).toContain(started.status);
+    if (started.status === 200) {
+      const browser = await started.json();
+      expect(browser.mode).toBe("browser");
+      expect(typeof browser.attemptId).toBe("string");
+      const url = new URL(browser.url);
+      expect(url.origin).toBe("https://auth.openai.com");
+      expect(url.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(url.searchParams.get("state")).toBeTruthy();
+      const attempt = await request(
+        `/api/oauth/chatgpt/attempt/${browser.attemptId}`,
+        teacher,
+      );
+      expect(attempt.status).toBe(200);
+      expect((await attempt.json()).status).toBe("pending");
+    } else {
+      const busy = await started.json();
+      expect(String(busy.error)).toContain("1455");
+    }
+
+    // WorkBuddy 仅支持设备码：旧 start 返回 409；已移除 provider 一律 404。
     expect(
-      unconfigured.providers.find((row: any) => row.id === "workbuddy")
-        .configured,
-    ).toBe(false);
+      (await request("/api/oauth/workbuddy/start", teacher, "POST", {})).status,
+    ).toBe(409);
     expect(
-      (
-        await request("/api/oauth/workbuddy/start", teacher, "POST")
-      ).status,
-    ).toBe(400);
+      (await request("/api/oauth/deepseek/start", teacher, "POST", {})).status,
+    ).toBe(404);
   });
 });

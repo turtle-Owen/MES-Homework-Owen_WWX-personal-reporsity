@@ -160,7 +160,7 @@ export function AuthPage({ onDone }: { onDone: () => void }) {
             <BookOpen />
           </span>
           <div>
-            校园作业分析<small>SMART CAMPUS · v0.2.1-rc3</small>
+            校园作业分析<small>SMART CAMPUS · v0.2.1-rc4</small>
           </div>
         </div>
         <div>

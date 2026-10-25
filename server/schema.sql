@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS student_insights(id TEXT PRIMARY KEY,student_id TEXT 
 CREATE INDEX IF NOT EXISTS idx_student_insights_student ON student_insights(student_id,created_at DESC);
 
 -- v0.2.1: OAuth model connections. Tokens are AES-256-GCM encrypted at rest.
-CREATE TABLE IF NOT EXISTS oauth_connections(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,provider TEXT NOT NULL,account_label TEXT NOT NULL DEFAULT '',encrypted_access TEXT NOT NULL,encrypted_refresh TEXT,iv TEXT NOT NULL,token_type TEXT NOT NULL DEFAULT 'Bearer',scope TEXT NOT NULL DEFAULT '',expires_at INTEGER,status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(user_id,provider));
+-- v0.2.1-rc4: meta_json stores provider identity (chatgpt accountId/email,
+-- workbuddy uid/enterpriseId/domain/region/nickname) and never tokens.
+CREATE TABLE IF NOT EXISTS oauth_connections(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,provider TEXT NOT NULL,account_label TEXT NOT NULL DEFAULT '',encrypted_access TEXT NOT NULL,encrypted_refresh TEXT,iv TEXT NOT NULL,token_type TEXT NOT NULL DEFAULT 'Bearer',scope TEXT NOT NULL DEFAULT '',expires_at INTEGER,status TEXT NOT NULL DEFAULT 'active',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,meta_json TEXT NOT NULL DEFAULT '{}',UNIQUE(user_id,provider));
 CREATE TABLE IF NOT EXISTS oauth_states(state TEXT PRIMARY KEY,user_id TEXT NOT NULL,provider TEXT NOT NULL,verifier TEXT NOT NULL,redirect TEXT NOT NULL DEFAULT '/',created_at INTEGER NOT NULL);
 
 -- v0.2.1: guided mistake book progress (hints / retry attempts / reveal).
